@@ -74,6 +74,9 @@ Discoverium is a fork of [Obtainium](https://github.com/ImranR98/Obtainium). [Ob
     alt="Get it on GitHub"
     height="80">](https://github.com/cygnusx-1-org/Discoverium/releases)
 
+### [Downloader](https://play.google.com/store/apps/details?id=com.esaba.downloader&hl=en_US)
+8376298 `discoverium-1.6.172.apk`
+
 ## Limitations
 - For some sources, data is gathered using Web scraping and can easily break due to changes in website design. In such cases, more reliable methods may be unavailable.
 
