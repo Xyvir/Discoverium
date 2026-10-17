@@ -72,3 +72,5 @@ packages/*/pubspec.lock
 
 # Golden-test diff output, written only on a failing run.
 test/goldens/failures/
+
+changelog_override.txt
