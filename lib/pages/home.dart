@@ -13,6 +13,7 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/nav_helper.dart';
 import 'package:provider/provider.dart';
 
@@ -108,7 +109,7 @@ class _HomePageState extends State<HomePage> {
         title: Text(tr('welcome')),
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          spacing: 20,
+          spacing: AppSpacings.sectionGap,
           children: [
             Text(tr('documentationLinksNote')),
             const LinkText(
@@ -131,7 +132,7 @@ class _HomePageState extends State<HomePage> {
         scrollable: true,
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          spacing: 20,
+          spacing: AppSpacings.sectionGap,
           children: [
             Text(tr('googleVerificationWarningP1')),
             LinkText(
@@ -367,8 +368,9 @@ class _HomePageState extends State<HomePage> {
     // Use the same extended (icon + label) FABs on every layout, so the
     // tablet/two-pane UI matches mobile.
     final actionsFab = TvFocusRing(
-      borderRadius: 16,
+      borderRadius: AppRadii.medium,
       child: FloatingActionButton.extended(
+        heroTag: null,
         onPressed: onActionsPressed,
         tooltip: plural('action', 2),
         icon: const Icon(Icons.more_vert),
@@ -378,6 +380,7 @@ class _HomePageState extends State<HomePage> {
     // Discoverium leads with discovery: the primary action opens the curated
     // Search view, which in turn offers Add App for a known URL.
     final searchFabExtended = FloatingActionButton.extended(
+      heroTag: null,
       onPressed: onSearchPressed,
       tooltip: tr('searchApps'),
       icon: const Icon(Icons.search),

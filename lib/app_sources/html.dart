@@ -242,6 +242,53 @@ Future<List<MapEntry<String, String>>> grabLinksCommon(
   return links;
 }
 
+/// Extracts a release date from a scraped string using [releaseDateRegEx]
+/// (optionally selecting a match group with [matchGroupString], `$N`-style).
+/// The extracted text is parsed with [dateFormatString] when set (an `intl`
+/// `DateFormat` pattern such as `EEE. MMMM do, yyyy - h:mma`), then falls back
+/// to [DateTime.tryParse]. Returns null when nothing usable is found.
+DateTime? extractHtmlReleaseDate(
+  String? releaseDateRegEx,
+  String? matchGroupString,
+  String? dateFormatString,
+  String stringToCheck,
+) {
+  if (releaseDateRegEx?.isNotEmpty != true) return null;
+  String? extracted;
+  try {
+    extracted = extractVersion(
+      releaseDateRegEx,
+      matchGroupString,
+      stringToCheck,
+    );
+  } on ObtainiumError catch (e) {
+    AppLogger.debug('Release date RegEx did not match: ${e.toString()}');
+    return null;
+  }
+  if (extracted?.isNotEmpty != true) return null;
+  // intl's parser is case-sensitive for AM/PM and expects bare day numbers,
+  // while scraped pages often use lowercase `pm` and ordinal suffixes (`3rd`).
+  final normalized = extracted!
+      .replaceAllMapped(
+        RegExp(r'(\d+)(st|nd|rd|th)\b', caseSensitive: false),
+        (m) => m.group(1)!,
+      )
+      .replaceAllMapped(
+        RegExp(r'(?<=\d)\s*([ap]m)\b', caseSensitive: false),
+        (m) => m.group(1)!.toUpperCase(),
+      );
+  final dateFormat = dateFormatString?.trim();
+  if (dateFormat?.isNotEmpty == true) {
+    try {
+      final parsed = DateFormat(dateFormat, 'en_US').tryParse(normalized);
+      if (parsed != null) return parsed;
+    } catch (e) {
+      AppLogger.debug('Invalid release date format: ${e.toString()}');
+    }
+  }
+  return DateTime.tryParse(normalized);
+}
+
 class HTML extends AppSource {
   @override
   List<List<GeneratedFormItem>> get combinedAppSpecificSettingFormItems {
@@ -320,11 +367,13 @@ class HTML extends AppSource {
   HTML() {
     name = 'HTML';
     suppressStandardVersionExtraction = true;
+    showReleaseDateAsVersionToggle = true;
   }
 
   @override
   List<List<GeneratedFormItem>>
   get additionalSourceAppSpecificSettingFormItems => [
+    [GeneratedFormHeader(label: tr('sectionLinkOptions'))],
     [
       GeneratedFormSubForm('intermediateLink', [
         ..._intermediateFormItems,
@@ -333,7 +382,46 @@ class HTML extends AppSource {
     ],
     _finalStepFormitems[0],
     ..._commonFormItems,
+    [GeneratedFormHeader(label: tr('sectionVersionOptions'))],
     ..._finalStepFormitems.sublist(1),
+    [
+      GeneratedFormDropdown(
+        'defaultPseudoVersioningMethod',
+        [
+          MapEntry('partialAPKHash', tr('partialAPKHash')),
+          MapEntry('APKLinkHash', tr('APKLinkHash')),
+          const MapEntry('ETag', 'ETag'),
+        ],
+        label: tr('defaultPseudoVersioningMethod'),
+        value: 'partialAPKHash',
+      ),
+    ],
+    [GeneratedFormHeader(label: tr('releaseDate'))],
+    [
+      GeneratedFormTextField(
+        'releaseDateRegEx',
+        label: tr('releaseDateRegEx'),
+        required: false,
+        additionalValidators: [(value) => regExValidator(value)],
+      ),
+    ],
+    [
+      GeneratedFormTextField(
+        'releaseDateMatchGroup',
+        label: tr('matchGroupToUseForX', args: [tr('releaseDateRegEx')]),
+        required: false,
+        hint: r'$0',
+      ),
+    ],
+    [
+      GeneratedFormTextField(
+        'releaseDateDateFormat',
+        label: tr('releaseDateDateFormat'),
+        required: false,
+        hint: 'EEE. MMMM d, yyyy - h:mma',
+      ),
+    ],
+    [GeneratedFormHeader(label: tr('sectionRequestHeaders'))],
     [
       GeneratedFormSubForm(
         'requestHeader',
@@ -368,18 +456,7 @@ class HTML extends AppSource {
         ],
       ),
     ],
-    [
-      GeneratedFormDropdown(
-        'defaultPseudoVersioningMethod',
-        [
-          MapEntry('partialAPKHash', tr('partialAPKHash')),
-          MapEntry('APKLinkHash', tr('APKLinkHash')),
-          const MapEntry('ETag', 'ETag'),
-        ],
-        label: tr('defaultPseudoVersioningMethod'),
-        value: 'partialAPKHash',
-      ),
-    ],
+    [GeneratedFormHeader(label: tr('sectionZipOptions'))],
     [
       GeneratedFormTextField(
         'zippedApkFilterRegEx',
@@ -522,6 +599,12 @@ class HTML extends AppSource {
               requestSettings,
               headers: apkReqHeaders,
             )).toString();
+      final releaseDate = extractHtmlReleaseDate(
+        additionalSettings['releaseDateRegEx'] as String?,
+        additionalSettings['releaseDateMatchGroup'] as String?,
+        additionalSettings['releaseDateDateFormat'] as String?,
+        versionExtractionWholePageString,
+      );
       return APKDetails(
         version,
         [rel].map((e) {
@@ -532,6 +615,7 @@ class HTML extends AppSource {
           return MapEntry('${e.hashCode}-$fileName', e);
         }).toList(),
         AppNames(uri.host, tr('app')),
+        releaseDate: releaseDate,
       );
     } catch (e) {
       rethrowOrWrapError(e);

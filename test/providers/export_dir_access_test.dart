@@ -7,6 +7,9 @@ const _documentFileChannel = MethodChannel(
   'io.alexrintt.plugins/sharedstorage/documentfile',
 );
 const _safAccessChannel = MethodChannel('dev.imranr.obtainium/saf_access');
+const _documentTreeChannel = MethodChannel(
+  'dev.imranr.obtainium/document_tree',
+);
 
 const _documents =
     'content://com.android.externalstorage.documents/tree/primary%3ADocuments';
@@ -47,11 +50,12 @@ void main() {
           return grants;
         case 'canRead':
         case 'canWrite':
-        case 'canOpenDocumentTree':
           return true;
-        case 'openDocumentTree':
-          return pickedDir;
       }
+      return null;
+    });
+    messenger.setMockMethodCallHandler(_documentTreeChannel, (call) async {
+      if (call.method == 'pickDocumentTree') return pickedDir;
       return null;
     });
     messenger.setMockMethodCallHandler(_safAccessChannel, (call) async {
@@ -66,6 +70,7 @@ void main() {
   tearDown(() {
     messenger.setMockMethodCallHandler(_documentFileChannel, null);
     messenger.setMockMethodCallHandler(_safAccessChannel, null);
+    messenger.setMockMethodCallHandler(_documentTreeChannel, null);
   });
 
   group('upgradeExportDirAccess', () {
@@ -120,8 +125,9 @@ void main() {
   });
 
   group('pickExportDir', () {
-    test('persists both modes of the picked tree and releases the old '
-        'one', () async {
+    // The native picker persists both modes itself, so only the old tree's
+    // grant goes through the channel, released in both modes.
+    test('releases both modes of the old tree', () async {
       grants = [_grant(_download, read: true)];
       pickedDir = _documents;
       final settings = await withPrefs({'exportDir': _download});
@@ -130,10 +136,6 @@ void main() {
 
       expect(safAccessCalls.map((c) => [c.method, c.arguments]).toList(), [
         [
-          'persistTreeAccess',
-          {'uri': _documents},
-        ],
-        [
           'releaseTreeAccess',
           {'uri': _download},
         ],
@@ -141,22 +143,14 @@ void main() {
       expect(settings.prefs!.getString('exportDir'), _documents);
     });
 
-    test('keeps the picked tree when persisting fails', () async {
-      pickedDir = _documents;
-      failPersist = true;
-      final settings = await withPrefs({});
-
-      await settings.pickExportDir();
-
-      expect(settings.prefs!.getString('exportDir'), _documents);
-    });
-
-    test('a cancelled pick persists nothing', () async {
-      final settings = await withPrefs({});
+    test('a cancelled pick touches nothing', () async {
+      grants = [_grant(_download, read: true)];
+      final settings = await withPrefs({'exportDir': _download});
 
       await settings.pickExportDir();
 
       expect(safAccessCalls, isEmpty);
+      expect(settings.prefs!.getString('exportDir'), _download);
     });
   });
 }

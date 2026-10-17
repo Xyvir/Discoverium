@@ -7,8 +7,8 @@ import 'package:obtainium/app_sources/github.dart';
 import 'package:obtainium/components/app_list_tile.dart';
 import 'package:obtainium/components/app_markdown.dart';
 import 'package:obtainium/components/category_editor.dart';
-import 'package:obtainium/components/generated_form_renderer.dart';
 import 'package:obtainium/components/qr_code_image.dart';
+import 'package:obtainium/pages/app_additional_options.dart';
 import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/components/app_detail_widgets.dart';
 import 'package:obtainium/theme.dart';
@@ -18,7 +18,7 @@ import 'package:obtainium/providers/notifications_provider.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
-import 'package:obtainium/custom_errors.dart';
+import 'package:obtainium/utils/update_health.dart';
 import 'package:obtainium/utils/locale_utils.dart';
 import 'package:obtainium/main.dart';
 import 'package:obtainium/utils/nav_helper.dart';
@@ -94,8 +94,6 @@ class _AppPageState extends State<AppPage> {
   int? _probedDownloadSize;
 
   void _maybeProbeDownloadSize(AppInMemory app) {
-    final String? releaseUrl = app.app.releaseUrl;
-    final bool hasReleaseUrl = releaseUrl != null && releaseUrl.isNotEmpty;
     final int apkIndex =
         (app.app.preferredApkIndex >= 0 &&
             app.app.preferredApkIndex < app.app.apkUrls.length)
@@ -106,18 +104,18 @@ class _AppPageState extends State<AppPage> {
             app.app.apkUrls[apkIndex].value,
           ).where((u) => u.isNotEmpty && u != 'placeholder').toList()
         : const [];
-    final String? key = urls.isNotEmpty
-        ? '${app.app.id}|${app.app.apkUrls[apkIndex].value}'
-        : hasReleaseUrl
-        ? '${app.app.id}|$releaseUrl'
-        : null;
-    if (key == null) {
-      if (_sizeProbeKey != null || _probedDownloadSize != null) {
-        _sizeProbeKey = null;
-        setState(() => _probedDownloadSize = null);
+    if (urls.isEmpty) {
+      // Track-only sources resolve the size during update checks.
+      final storedSize = app.app.apkSizeBytes;
+      final key = '${app.app.id}|size';
+      if (key == _sizeProbeKey && _probedDownloadSize == storedSize) return;
+      _sizeProbeKey = key;
+      if (mounted) {
+        setState(() => _probedDownloadSize = storedSize);
       }
       return;
     }
+    final key = '${app.app.id}|${app.app.apkUrls[apkIndex].value}';
     if (key == _sizeProbeKey) return;
     _sizeProbeKey = key;
     _probedDownloadSize = null;
@@ -127,46 +125,33 @@ class _AppPageState extends State<AppPage> {
           app.app.url,
           overrideSource: app.app.overrideSource,
         );
-        if (urls.isNotEmpty) {
-          // A split set is downloaded in full, so report the combined size.
-          final sizes = await Future.wait(
-            urls.map((url) async {
-              final resolvedUrl = await source.assetUrlPrefetchModifier(
-                url,
-                app.app.url,
-                app.app.additionalSettings,
-              );
-              final headers = await source.getRequestHeaders(
-                app.app.additionalSettings,
-                resolvedUrl,
-                forAPKDownload: true,
-              );
-              return getDownloadSize(
-                resolvedUrl,
-                headers: headers,
-                allowInsecure: app.app.settings.getBool('allowInsecure'),
-                enableCertificatePinning:
-                    settingsProvider.enableCertificatePinning,
-              );
-            }),
-          );
-          final knownSizes = sizes.whereType<int>();
-          if (mounted && _sizeProbeKey == key && knownSizes.isNotEmpty) {
-            setState(
-              () => _probedDownloadSize = knownSizes.reduce((a, b) => a + b),
+        // A split set is downloaded in full, so report the combined size.
+        final sizes = await Future.wait(
+          urls.map((url) async {
+            final resolvedUrl = await source.assetUrlPrefetchModifier(
+              url,
+              app.app.url,
+              app.app.additionalSettings,
             );
-          }
-        } else {
-          // Track-only sources (e.g. APKMirror) have no direct APK URL; let the
-          // source resolve the size from its release page instead.
-          final size = await source.resolveDownloadSize(
-            app.app.url,
-            app.app.additionalSettings,
-            releaseUrl: releaseUrl,
+            final headers = await source.getRequestHeaders(
+              app.app.additionalSettings,
+              resolvedUrl,
+              forAPKDownload: true,
+            );
+            return getDownloadSize(
+              resolvedUrl,
+              headers: headers,
+              allowInsecure: app.app.settings.getBool('allowInsecure'),
+              enableCertificatePinning:
+                  settingsProvider.enableCertificatePinning,
+            );
+          }),
+        );
+        final knownSizes = sizes.whereType<int>();
+        if (mounted && _sizeProbeKey == key && knownSizes.isNotEmpty) {
+          setState(
+            () => _probedDownloadSize = knownSizes.reduce((a, b) => a + b),
           );
-          if (mounted && _sizeProbeKey == key && size != null) {
-            setState(() => _probedDownloadSize = size);
-          }
         }
       } catch (e) {
         // Best-effort only: leave the size unknown when it can't be resolved.
@@ -315,89 +300,22 @@ class _AppPageState extends State<AppPage> {
     return copy;
   }
 
-  Future<void> getUpdate(BuildContext context) async {
-    try {
-      updating = true;
-      if (mounted) setState(() {});
-      await appsProvider.checkUpdate(appId);
-    } catch (err) {
-      if (err is RepositoryRenamedError && context.mounted) {
-        await appsProvider.updatePendingRepoRename(appId, err.newUrl);
-      } else if (context.mounted) {
-        showError(err, context);
-      }
-    } finally {
-      updating = false;
-      if (mounted) setState(() {});
-    }
+  Future<void> getUpdate(BuildContext context) {
+    return refreshAppMetadata(
+      context,
+      appId: appId,
+      onBusyChanged: (busy) {
+        updating = busy;
+        if (mounted) setState(() {});
+      },
+    );
   }
 
   Future<Map<String, dynamic>?> showAdditionalOptionsDialog(
     BuildContext context,
     AppInMemory? app,
-  ) async {
-    final s = source;
-    final items = (s?.combinedAppSpecificSettingFormItems ?? []).map((row) {
-      row = row.map((e) {
-        if (app?.app.additionalSettings[e.key] != null) {
-          e.value = app?.app.additionalSettings[e.key];
-        }
-        return e;
-      }).toList();
-      return row;
-    }).toList();
-
-    Map<String, dynamic> values = {};
-    return Navigator.of(context).push<Map<String, dynamic>>(
-      MaterialPageRoute(
-        traversalEdgeBehavior: traversalEdgeBehaviorFor(context),
-        builder: (ctx) => PopScope<Map<String, dynamic>>(
-          // Leaving the page saves the settings, so there is no Continue button.
-          canPop: false,
-          onPopInvokedWithResult: (didPop, result) {
-            if (didPop) return;
-            // While a text field is being edited, the first BACK only
-            // dismisses the keyboard; it must not also save and leave.
-            if (isEditingTextField()) {
-              FocusManager.instance.primaryFocus?.unfocus();
-              return;
-            }
-            Navigator.of(ctx).pop(values);
-          },
-          child: Scaffold(
-            backgroundColor: Theme.of(context).colorScheme.surface,
-            body: CustomScrollView(
-              slivers: [
-                SliverAppBar(
-                  pinned: true,
-                  automaticallyImplyLeading: true,
-                  title: Text(
-                    tr('additionalOptsFor', args: [app?.name ?? tr('app')]),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      16,
-                      0,
-                      16,
-                      MediaQuery.of(context).padding.bottom,
-                    ),
-                    child: GeneratedForm(
-                      tileMode: true,
-                      items: items,
-                      onValueChanges: (v, valid, isBuilding) {
-                        values = v;
-                      },
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  ) {
+    return showAdditionalOptionsPage(context, source, app);
   }
 
   void handleAdditionalOptionChanges(
@@ -405,45 +323,19 @@ class _AppPageState extends State<AppPage> {
     BuildContext context,
     AppInMemory? app,
   ) {
-    if (app != null && values != null) {
-      final s = source;
-      final Map<String, dynamic> originalSettings = app.app.additionalSettings;
-      final savedValues = Map<String, dynamic>.from(values);
-      // The additional-options form does not include every stored setting
-      // (e.g. the add-time package ID field and source-config overrides such
-      // as credentials), so carry those over instead of dropping them.
-      originalSettings.forEach((key, value) {
-        savedValues.putIfAbsent(key, () => value);
-      });
-      // Turning off remembering the APK picked from several forgets the
-      // pick, so the next install asks again.
-      final forgetChosenApk =
-          TypedSettings(
-            originalSettings,
-          ).getBool('rememberChosenApk', defaultValue: true) &&
-          !TypedSettings(
-            savedValues,
-          ).getBool('rememberChosenApk', defaultValue: true);
-      app.app = app.app.copyWith(
-        additionalSettings: savedValues,
-        preferredApkName: forgetChosenApk ? null : app.app.preferredApkName,
-      );
-      if (s?.enforceTrackOnly == true) {
-        app.app = app.app.copyWith(
-          additionalSettings: Map<String, dynamic>.from(
-            app.app.additionalSettings,
-          )..['trackOnly'] = true,
-        );
-        if (context.mounted) {
-          showMessage(tr('appsFromSourceAreTrackOnly'), context);
-        }
-      }
-      appsProvider.saveApps([app.app]).then((_) {
-        if (context.mounted) {
-          getUpdate(context);
-        }
-      });
-    }
+    if (app == null || values == null) return;
+    unawaited(
+      applyAdditionalOptionChanges(
+        context,
+        source,
+        app,
+        values,
+        onBusyChanged: (busy) {
+          updating = busy;
+          if (mounted) setState(() {});
+        },
+      ),
+    );
   }
 
   Future<List<String>> installOrUpdate(
@@ -481,6 +373,13 @@ class _AppPageState extends State<AppPage> {
   void resetInstallStatus(AppInMemory? app) {
     if (app == null) return;
     app.app = app.app.copyWith(installedVersion: null);
+    unawaited(appsProvider.saveApps([app.app]));
+  }
+
+  void toggleAppDisabled(AppInMemory? app) {
+    if (app == null) return;
+    settingsProvider.selectionClick();
+    app.app = app.app.copyWith(disabled: !app.app.disabled);
     unawaited(appsProvider.saveApps([app.app]));
   }
 
@@ -524,7 +423,7 @@ class _AppPageState extends State<AppPage> {
     if (_webViewError != null) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(AppSpacings.xxl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -584,6 +483,10 @@ class _AppPageState extends State<AppPage> {
     final trackOnly = app?.app.settings.getBool('trackOnly') == true;
     return FilledButton.icon(
       onPressed: hasAction ? () => _handleInstallOrUpdate(context, app) : null,
+      autofocus:
+          hasAction &&
+          widget.onClose == null &&
+          context.read<SettingsProvider>().isTV,
       icon: Icon(
         installed == null
             ? Icons.download_outlined
@@ -708,6 +611,16 @@ class _AppPageState extends State<AppPage> {
           icon: const Icon(Icons.restore_rounded),
           tooltip: tr('resetInstallStatus'),
         ),
+      if (app != null)
+        IconButton(
+          onPressed: app.downloadProgress != null || updating
+              ? null
+              : () => toggleAppDisabled(app),
+          tooltip: app.app.disabled ? tr('enableApp') : tr('disableApp'),
+          icon: Icon(
+            app.app.disabled ? Icons.play_arrow_rounded : Icons.block_outlined,
+          ),
+        ),
       IconButton(
         onPressed: app == null || app.downloadProgress != null || updating
             ? null
@@ -762,7 +675,7 @@ class _AppPageState extends State<AppPage> {
     final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
     return Row(
-      spacing: 12,
+      spacing: AppSpacings.md,
       children: [
         Icon(icon, size: 24, color: cs.onSurfaceVariant),
         Expanded(
@@ -805,7 +718,7 @@ class _AppPageState extends State<AppPage> {
           padding: AppPaddings.page,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: 3,
+            spacing: AppSpacings.connectedGap,
             children: [
               ConnectedCard(
                 isFirst: true,
@@ -829,7 +742,7 @@ class _AppPageState extends State<AppPage> {
                 isFirst: false,
                 isLast: true,
                 child: Row(
-                  spacing: 12,
+                  spacing: AppSpacings.md,
                   children: [
                     Expanded(
                       child: OutlinedButton(
@@ -929,6 +842,19 @@ class _AppPageState extends State<AppPage> {
         : appHeldUntil(app!.app, settingsProvider);
     final apkCount = app?.app.apkUrls.length ?? 0;
     final changeLogFn = app != null ? getChangeLogFn(context, app.app) : null;
+    final appData = app?.app;
+    final UpdateHealthConfig? updateHealthConfig =
+        appData == null || appData.disabled
+        ? null
+        : resolveUpdateHealthConfig(
+            appData.additionalSettings,
+            settingsProvider,
+          );
+    final updateHealthReasons = updateHealthConfig == null
+        ? const <UpdateHealthReason>[]
+        : evaluateUpdateHealthReasons(appData!, updateHealthConfig);
+    final updateHealthIgnored =
+        updateHealthConfig != null && isUpdateHealthIgnored(appData!);
     return [
       _buildSection(
         true,
@@ -971,7 +897,7 @@ class _AppPageState extends State<AppPage> {
                 excluding: settingsProvider.isTV,
                 child: InkWell(
                   onTap: changeLogFn,
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(AppRadii.inline),
                   child: Text(
                     app?.app.releaseDate == null
                         ? tr('changes')
@@ -993,9 +919,42 @@ class _AppPageState extends State<AppPage> {
                 ),
               ),
             ),
+          if (updateHealthReasons.isNotEmpty || updateHealthIgnored)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: InkWell(
+                onTap: () => NavHelper.pushUpdateHealthPage(context),
+                borderRadius: BorderRadius.circular(AppRadii.inline),
+                child: Row(
+                  children: [
+                    Icon(
+                      updateHealthIgnored
+                          ? Icons.info_outline
+                          : Icons.warning_amber_rounded,
+                      size: 16,
+                      color: updateHealthIgnored
+                          ? cs.onSurfaceVariant
+                          : cs.error,
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        updateHealthIgnored
+                            ? tr('updateHealthIgnoredNote')
+                            : tr('updateHealthViewDetails'),
+                        style: tt.bodyMedium?.copyWith(
+                          color: cs.primary,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
-      const SliverToBoxAdapter(child: SizedBox(height: 2)),
+      const SliverToBoxAdapter(child: SizedBox(height: AppSpacings.xs)),
       _buildSection(
         false,
         true,
@@ -1340,7 +1299,7 @@ class _AppPageState extends State<AppPage> {
     if (certs) {
       final a = app!;
       widgets.addAll([
-        const SliverToBoxAdapter(child: SizedBox(height: 2)),
+        const SliverToBoxAdapter(child: SizedBox(height: AppSpacings.xs)),
         _buildSection(
           false,
           !hasAssets,
@@ -1372,7 +1331,7 @@ class _AppPageState extends State<AppPage> {
     }
     if (hasAssets) {
       widgets.addAll([
-        const SliverToBoxAdapter(child: SizedBox(height: 2)),
+        const SliverToBoxAdapter(child: SizedBox(height: AppSpacings.xs)),
         _buildSection(
           false,
           true,
@@ -1419,6 +1378,9 @@ class _AppPageState extends State<AppPage> {
         CategorySelector(
           alignment: WrapAlignment.start,
           selected: app?.app.categories.toSet() ?? {},
+          onManage: context.read<SettingsProvider>().isTV
+              ? () => showCategoryManagerDialog(context)
+              : null,
           onChanged: (categories) {
             if (app != null) {
               app.app = app.app.copyWith(categories: categories.toList());
@@ -1464,7 +1426,7 @@ class _AppPageState extends State<AppPage> {
                   ),
                 ),
                 if (app.downloadProgress! >= 0) ...[
-                  const SizedBox(width: 8),
+                  const SizedBox(width: AppSpacings.elementGap),
                   DownloadCancelButton(
                     onPressed: () => appsProvider.cancelDownload(widget.appId),
                   ),
@@ -1489,16 +1451,23 @@ class _AppPageState extends State<AppPage> {
           padding: const EdgeInsets.only(top: 4),
           child: Row(
             children: [
-              ..._getSecondaryActions(
-                context,
-                app,
-                source,
-                appsProvider,
-                settingsProvider,
-                showAppWebpageFinal,
-                trackOnly,
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: _getSecondaryActions(
+                      context,
+                      app,
+                      source,
+                      appsProvider,
+                      settingsProvider,
+                      showAppWebpageFinal,
+                      trackOnly,
+                    ),
+                  ),
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: AppSpacings.elementGap),
               _getPrimaryButton(context, app, areDownloadsRunning),
             ],
           ),
@@ -1671,6 +1640,7 @@ class _AppPageState extends State<AppPage> {
       appBar: showAppWebpageFinal ? _appScreenAppBar() : null,
       floatingActionButton: showAppWebpageFinal
           ? FloatingActionButton(
+              heroTag: null,
               onPressed: () {
                 settingsProvider.selectionClick();
                 NavHelper.pushAppPage(
@@ -1700,6 +1670,13 @@ class _AppPageState extends State<AppPage> {
                     child: RefreshIndicator(
                       onRefresh: () async {
                         if (app != null) {
+                          if (app.app.disabled) {
+                            showMessage(
+                              tr('appDisabledNoUpdateCheck'),
+                              context,
+                            );
+                            return;
+                          }
                           await getUpdate(context);
                         }
                       },

@@ -409,7 +409,7 @@ class _AdvancedSearchPageState extends State<AdvancedSearchPage> {
           : ListView(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
               children: [
-                SectionHeader(title: tr('singleSource')),
+                _SectionHeader(title: tr('singleSource')),
                 const SizedBox(height: 8),
                 FilledButton.tonal(
                   onPressed: doingSomething ? null : _pickSourceThenSearch,
@@ -420,7 +420,7 @@ class _AdvancedSearchPageState extends State<AdvancedSearchPage> {
                 const SizedBox(height: 24),
                 const Divider(),
                 const SizedBox(height: 16),
-                SectionHeader(title: tr('multipleSources')),
+                _SectionHeader(title: tr('multipleSources')),
                 const SizedBox(height: 8),
                 Row(
                   spacing: 16,
@@ -475,6 +475,29 @@ class _AdvancedSearchPageState extends State<AdvancedSearchPage> {
                 ],
               ],
             ),
+    );
+  }
+}
+
+/// The smaller, primary-coloured header that groups the search modes. Kept
+/// apart from the shared [SectionHeader], which is larger and styled for
+/// settings sections.
+class _SectionHeader extends StatelessWidget {
+  final String title;
+
+  const _SectionHeader({required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+          fontWeight: FontWeight.bold,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+      ),
     );
   }
 }

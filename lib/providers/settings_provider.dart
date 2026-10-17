@@ -12,6 +12,7 @@ import 'package:obtainium/main.dart';
 
 import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
+import 'package:obtainium/providers/document_tree_bridge.dart';
 import 'package:obtainium/providers/source_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -71,6 +72,11 @@ String updateIntervalLabel(int minutes) {
 const String obtainiumTempId = 'cygnusx-1-org_obtainium_github.com';
 const String obtainiumId = 'org.cygnusx1.discoverium';
 const String obtainiumUrl = 'https://github.com/cygnusx-1-org/Discoverium';
+
+/// Sentinel stored as the export directory on devices without a document-tree
+/// picker (typically TVs): exports go to `Downloads/Discoverium/` through
+/// MediaStore instead of a user-picked SAF tree.
+const String kDownloadsExportDir = 'tv-downloads:';
 const Color obtainiumThemeColor = Color(0xFF6438B5);
 
 Locale? tryParseLocale(String? localeString) {
@@ -112,6 +118,10 @@ enum AppListDensity { standard, compact, dense }
 /// Which repo apps the Search view lists by their `tv` support: everything but
 /// the TV-only ones, everything, or only the ones that run on TV.
 enum TvAppsMode { off, on, tvOnly }
+
+/// What background work may run when a guard condition (not on Wi-Fi, not
+/// charging) is unmet. When the condition is met the mode is irrelevant.
+enum BgGuardMode { nothing, checksOnly, checksAndUpdates }
 
 class SettingsProvider with ChangeNotifier {
   SharedPreferences? prefs;
@@ -233,6 +243,19 @@ class SettingsProvider with ChangeNotifier {
     installerMode = useShizuku
         ? InstallerMode.shizuku.name
         : InstallerMode.system.name;
+  }
+
+  String get shizukuInstallerMode {
+    final stored = _getString('shizukuInstallerMode');
+    return stored == 'shizuku' || stored == 'dhizuku' ? stored! : 'auto';
+  }
+
+  set shizukuInstallerMode(String mode) {
+    prefs?.setString(
+      'shizukuInstallerMode',
+      mode == 'shizuku' || mode == 'dhizuku' ? mode : 'auto',
+    );
+    notifyListeners();
   }
 
   String? get externalInstallerPackage =>
@@ -551,6 +574,40 @@ class SettingsProvider with ChangeNotifier {
       }
     }
     prefs?.setString('categories', jsonEncode(cats));
+    // Deleted/renamed categories must not leave stale exclusions behind.
+    final excluded = categoriesExcludedFromChecks
+        .where(cats.containsKey)
+        .toSet();
+    prefs?.setString(
+      'categoriesExcludedFromChecks',
+      jsonEncode(excluded.toList()),
+    );
+    notifyListeners();
+  }
+
+  /// Categories whose apps are skipped by automatic update checks (#3375).
+  Set<String> get categoriesExcludedFromChecks {
+    final raw = _getString('categoriesExcludedFromChecks');
+    if (raw == null || raw.isEmpty) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.map((e) => e.toString()).toSet();
+      }
+    } catch (e) {
+      AppLogger.error(
+        e,
+        message: 'Corrupted category exclusion data, resetting',
+      );
+    }
+    return <String>{};
+  }
+
+  set categoriesExcludedFromChecks(Set<String> categories) {
+    prefs?.setString(
+      'categoriesExcludedFromChecks',
+      jsonEncode(categories.toList()),
+    );
     notifyListeners();
   }
 
@@ -654,6 +711,15 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  bool get allowAddingAppsWithoutCheck {
+    return _getBool('allowAddingAppsWithoutCheck') ?? false;
+  }
+
+  set allowAddingAppsWithoutCheck(bool value) {
+    prefs?.setBool('allowAddingAppsWithoutCheck', value);
+    notifyListeners();
+  }
+
   bool get enableBackgroundUpdates {
     return _getBool('enableBackgroundUpdates') ?? true;
   }
@@ -672,23 +738,41 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  bool get bgUpdatesOnWiFiOnly {
-    return _getBool('bgUpdatesOnWiFiOnly') ?? false;
+  BgGuardMode _bgGuardMode(
+    String key,
+    String legacyKey, {
+    BgGuardMode fallback = BgGuardMode.checksAndUpdates,
+  }) {
+    final stored = _getString(key);
+    if (stored != null && BgGuardMode.values.any((m) => m.name == stored)) {
+      return BgGuardMode.values.byName(stored);
+    }
+    final legacy = _getBool(legacyKey);
+    if (legacy != null) {
+      return legacy ? BgGuardMode.checksOnly : BgGuardMode.checksAndUpdates;
+    }
+    return fallback;
   }
 
-  set bgUpdatesOnWiFiOnly(bool val) {
-    prefs?.setBool('bgUpdatesOnWiFiOnly', val);
+  void _setBgGuardMode(String key, BgGuardMode mode) {
+    prefs?.setString(key, mode.name);
     notifyListeners();
   }
 
-  bool get bgUpdatesWhileChargingOnly {
-    return _getBool('bgUpdatesWhileChargingOnly') ?? true;
-  }
+  BgGuardMode get bgGuardOnWiFi =>
+      _bgGuardMode('bgGuardOnWiFi', 'bgUpdatesOnWiFiOnly');
 
-  set bgUpdatesWhileChargingOnly(bool val) {
-    prefs?.setBool('bgUpdatesWhileChargingOnly', val);
-    notifyListeners();
-  }
+  set bgGuardOnWiFi(BgGuardMode mode) => _setBgGuardMode('bgGuardOnWiFi', mode);
+
+  /// Unlike upstream, installs wait for the charger by default.
+  BgGuardMode get bgGuardWhileCharging => _bgGuardMode(
+    'bgGuardWhileCharging',
+    'bgUpdatesWhileChargingOnly',
+    fallback: BgGuardMode.checksOnly,
+  );
+
+  set bgGuardWhileCharging(BgGuardMode mode) =>
+      _setBgGuardMode('bgGuardWhileCharging', mode);
 
   bool get bgUpdatesWhileLockedOnly {
     return _getBool('bgUpdatesWhileLockedOnly') ?? true;
@@ -709,7 +793,7 @@ class SettingsProvider with ChangeNotifier {
   }
 
   bool get disableSwipeActions {
-    return _getBool('disableSwipeActions') ?? false;
+    return _getBool('disableSwipeActions') ?? true;
   }
 
   set disableSwipeActions(bool val) {
@@ -726,10 +810,11 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// shared_storage persists only the write mode of a picked tree. Read access
-  /// then survives only until the next reboot, after which [getExportDir]
-  /// finds the directory unreadable and the export dir looks unset (#55).
-  /// This native channel persists and releases both modes instead.
+  /// shared_storage persisted only the write mode of a picked tree. Read access
+  /// then survived only until the next reboot, after which [getExportDir]
+  /// found the directory unreadable and the export dir looked unset (#55).
+  /// [DocumentTreeBridge] now picks with both modes; this native channel
+  /// widens grants picked before that and releases both modes.
   static const _safAccessChannel = MethodChannel(
     'dev.imranr.obtainium/saf_access',
   );
@@ -774,10 +859,13 @@ class SettingsProvider with ChangeNotifier {
     if (uriString == null) {
       return null;
     }
+    if (uriString == kDownloadsExportDir) {
+      return Uri.parse(uriString);
+    }
     final uri = Uri.parse(uriString);
     // The directory may be temporarily unreadable (e.g. a WebDAV mount not
     // yet available right after a reboot). Keep the stored URI so it can be
-    // retried later, and only clear it via pickExportDir.
+    // retried later.
     try {
       if (!(await saf.canRead(uri) ?? false) ||
           !(await saf.canWrite(uri) ?? false)) {
@@ -792,40 +880,29 @@ class SettingsProvider with ChangeNotifier {
     return uri;
   }
 
-  Future<void> pickExportDir({bool remove = false}) async {
+  /// Switches exports to the MediaStore-backed `Downloads/Discoverium/` folder
+  /// for devices without a document-tree picker.
+  Future<void> useDownloadsExportDir() async {
+    await prefs?.setString('exportDir', kDownloadsExportDir);
+    notifyListeners();
+  }
+
+  Future<void> pickExportDir() async {
     final existingSAFPerms = (await saf.persistedUriPermissions()) ?? [];
     final currentOneWayDataSyncDir = await getExportDir();
-    Uri? newOneWayDataSyncDir;
-    if (!remove) {
-      // Some devices (e.g. certain Android TV boxes) have no activity that
-      // handles ACTION_OPEN_DOCUMENT_TREE; check first so the user gets a
-      // clear message instead of a raw platform exception.
-      if ((await saf.canOpenDocumentTree()) != true) {
-        throw ObtainiumError(tr('noFilePickerAvailable'));
-      }
-      try {
-        newOneWayDataSyncDir = (await saf.openDocumentTree());
-      } catch (e) {
-        AppLogger.error(e, message: 'Failed to open document tree');
-        throw ObtainiumError(tr('noFilePickerAvailable'));
-      }
-      if (newOneWayDataSyncDir != null) {
-        try {
-          await _persistTreeAccess(newOneWayDataSyncDir);
-        } catch (e) {
-          // The directory still works until the next reboot, so keep it.
-          AppLogger.error(e, message: 'Failed to persist export dir access');
-        }
-      }
+    final Uri? newOneWayDataSyncDir;
+    try {
+      newOneWayDataSyncDir = await DocumentTreeBridge.instance
+          .pickDocumentTree();
+    } catch (e) {
+      AppLogger.error(e, message: 'Failed to open document tree');
+      throw ObtainiumError(tr('noFilePickerAvailable'));
     }
-    if (currentOneWayDataSyncDir?.path != newOneWayDataSyncDir?.path) {
-      if (newOneWayDataSyncDir == null) {
-        await prefs?.remove('exportDir');
-      } else {
-        unawaited(
-          prefs?.setString('exportDir', newOneWayDataSyncDir.toString()),
-        );
-      }
+    if (newOneWayDataSyncDir == null) {
+      return;
+    }
+    if (currentOneWayDataSyncDir?.path != newOneWayDataSyncDir.path) {
+      unawaited(prefs?.setString('exportDir', newOneWayDataSyncDir.toString()));
       notifyListeners();
     }
     for (var e in existingSAFPerms) {
@@ -922,6 +999,60 @@ class SettingsProvider with ChangeNotifier {
 
   set minimumUpdateAgeHours(int val) {
     prefs?.setInt('minimumUpdateAgeHours', val < 0 ? 0 : val);
+    notifyListeners();
+  }
+
+  int get updateHealthStaleReleaseDays {
+    return _getInt('updateHealthStaleReleaseDays') ?? 180;
+  }
+
+  set updateHealthStaleReleaseDays(int val) {
+    prefs?.setInt('updateHealthStaleReleaseDays', val < 0 ? 0 : val);
+    notifyListeners();
+  }
+
+  int get updateHealthStaleVersionDays {
+    return _getInt('updateHealthStaleVersionDays') ?? 180;
+  }
+
+  set updateHealthStaleVersionDays(int val) {
+    prefs?.setInt('updateHealthStaleVersionDays', val < 0 ? 0 : val);
+    notifyListeners();
+  }
+
+  int get updateHealthFailedChecksCount {
+    return _getInt('updateHealthFailedChecksCount') ?? 5;
+  }
+
+  set updateHealthFailedChecksCount(int val) {
+    prefs?.setInt('updateHealthFailedChecksCount', val < 0 ? 0 : val);
+    notifyListeners();
+  }
+
+  bool get updateHealthArchivedEnabled {
+    return _getBool('updateHealthArchivedEnabled') ?? true;
+  }
+
+  set updateHealthArchivedEnabled(bool val) {
+    prefs?.setBool('updateHealthArchivedEnabled', val);
+    notifyListeners();
+  }
+
+  int get updateHealthFilteredReleasesCount {
+    return _getInt('updateHealthFilteredReleasesCount') ?? 5;
+  }
+
+  set updateHealthFilteredReleasesCount(int val) {
+    prefs?.setInt('updateHealthFilteredReleasesCount', val < 0 ? 0 : val);
+    notifyListeners();
+  }
+
+  bool get showUpdateHealthIndicator {
+    return _getBool('showUpdateHealthIndicator') ?? true;
+  }
+
+  set showUpdateHealthIndicator(bool val) {
+    prefs?.setBool('showUpdateHealthIndicator', val);
     notifyListeners();
   }
 

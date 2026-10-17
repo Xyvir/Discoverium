@@ -8,6 +8,7 @@ import 'package:obtainium/components/generated_form_renderer.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/providers/settings_provider.dart';
+import 'package:obtainium/utils/color_utils.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
@@ -35,6 +36,10 @@ Future<bool> showConfirmDialog(
       content: content,
       actions: [
         TextButton(
+          // On TV, focus the safe option unless the caller asked for the
+          // confirm button: an unfocused dialog would let remote input fall
+          // through to the page behind it.
+          autofocus: !autofocusConfirm && context.read<SettingsProvider>().isTV,
           onPressed: () => Navigator.of(ctx).pop(false),
           child: Text(cancelText ?? tr('no')),
         ),
@@ -246,22 +251,27 @@ class _TvDropdownMenuState<T> extends State<TvDropdownMenu<T>> {
         }
         return KeyEventResult.ignored;
       },
-      child: ListenableBuilder(
-        listenable: _focusNode,
-        builder: (context, child) => DecoratedBox(
-          position: DecorationPosition.foreground,
-          decoration: BoxDecoration(
-            border: _focusNode.hasFocus
-                ? Border.all(
-                    color: Theme.of(context).colorScheme.primary,
-                    width: 3,
-                  )
-                : null,
-            borderRadius: BorderRadius.circular(16),
+      // Focus must never enter the DropdownMenu subtree on TV: its closed
+      // menu consumes arrow keys without navigating, which would trap the
+      // D-pad on the row.
+      child: ExcludeFocus(
+        child: ListenableBuilder(
+          listenable: _focusNode,
+          builder: (context, child) => DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: BoxDecoration(
+              border: _focusNode.hasFocus
+                  ? Border.all(
+                      color: Theme.of(context).colorScheme.primary,
+                      width: 3,
+                    )
+                  : null,
+              borderRadius: BorderRadius.circular(AppRadii.medium),
+            ),
+            child: child,
           ),
-          child: child,
+          child: dropdown,
         ),
-        child: dropdown,
       ),
     );
   }
@@ -337,7 +347,7 @@ class EmptyState extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(AppSpacings.xxl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -658,9 +668,9 @@ class LinkText extends StatelessWidget {
     return Semantics(
       link: true,
       child: TvFocusRing(
-        borderRadius: 4,
+        borderRadius: AppRadii.inline,
         child: InkWell(
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(AppRadii.inline),
           onTap: () => unawaited(
             launchUrlString(url, mode: LaunchMode.externalApplication),
           ),
@@ -746,6 +756,52 @@ class CustomAppBar extends StatelessWidget {
       actions: actions,
     );
   }
+}
+
+/// Gives freshly pushed pages an initial focus ring on TV.
+///
+/// Pages without an explicit autofocus open unfocused, so the first SELECT
+/// does nothing until a direction key is pressed. This focuses the first
+/// control below the app bar unless the page already focused something;
+/// arrow-up still reaches the bar geometrically.
+class TvInitialFocus extends StatefulWidget {
+  final Widget child;
+
+  const TvInitialFocus({super.key, required this.child});
+
+  @override
+  State<TvInitialFocus> createState() => _TvInitialFocusState();
+}
+
+class _TvInitialFocusState extends State<TvInitialFocus> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !context.read<SettingsProvider>().isTV) return;
+      final scope = FocusScope.of(context);
+      if (scope.hasFocus) return;
+      final policy = FocusTraversalGroup.maybeOf(context);
+      if (policy == null) return;
+      FocusNode? first = policy.findFirstFocus(scope, ignoreCurrentFocus: true);
+      // Skip leading app-bar buttons (e.g. Back) so the first content
+      // control gets the ring.
+      for (var i = 0; i < 4 && first != null; i++) {
+        final ctx = first.context;
+        final inAppBar =
+            ctx?.findAncestorWidgetOfExactType<CustomAppBar>() != null ||
+            ctx?.findAncestorWidgetOfExactType<SliverAppBar>() != null ||
+            ctx?.findAncestorWidgetOfExactType<AppBar>() != null;
+        if (!inAppBar) break;
+        if (!first.nextFocus()) return;
+        first = FocusManager.instance.primaryFocus;
+      }
+      first?.requestFocus();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _TileClipper extends CustomClipper<Path> {
@@ -862,7 +918,10 @@ class CardTile extends StatelessWidget {
   const CardTile({
     super.key,
     required this.child,
-    this.padding = const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+    this.padding = const EdgeInsets.symmetric(
+      horizontal: AppSpacings.lg,
+      vertical: 0,
+    ),
     this.borderRadius,
     this.color,
   });
@@ -878,6 +937,26 @@ class CardTile extends StatelessWidget {
         color: color ?? Theme.of(context).colorScheme.surfaceContainerLow,
         child: Padding(padding: padding, child: child),
       ),
+    );
+  }
+}
+
+/// A labelled section header used to group settings, form rows and lists.
+class SectionHeader extends StatelessWidget {
+  final String label;
+  final EdgeInsetsGeometry padding;
+
+  const SectionHeader(
+    this.label, {
+    super.key,
+    this.padding = AppPaddings.sectionHeader,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: padding,
+      child: Text(label, style: sectionHeaderTextStyle(context)),
     );
   }
 }
@@ -904,9 +983,7 @@ class ToggleTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return TvFocusRing(
       child: ListTile(
-        contentPadding: noPadding
-            ? EdgeInsets.zero
-            : const EdgeInsets.symmetric(horizontal: 20),
+        contentPadding: noPadding ? EdgeInsets.zero : AppPaddings.rowHorizontal,
         title: Text(label),
         subtitle: subtitle,
         trailing: Row(
@@ -932,6 +1009,130 @@ class ToggleTile extends StatelessWidget {
   }
 }
 
+/// A labelled slider over a fixed list of integer options, with the chosen
+/// value rendered by [labelBuilder]. Mirrors the update-interval/minimum-age
+/// sliders in the settings page and stays its own [StatefulWidget] so dragging
+/// only rebuilds this tile; the value is committed when the drag ends.
+class NumericOptionSliderTile extends StatefulWidget {
+  final String label;
+  final List<int> options;
+  final int value;
+  final ValueChanged<int> onChanged;
+  final String Function(int value) labelBuilder;
+
+  const NumericOptionSliderTile({
+    super.key,
+    required this.label,
+    required this.options,
+    required this.value,
+    required this.onChanged,
+    required this.labelBuilder,
+  });
+
+  @override
+  State<NumericOptionSliderTile> createState() =>
+      _NumericOptionSliderTileState();
+}
+
+class _NumericOptionSliderTileState extends State<NumericOptionSliderTile> {
+  late double sliderVal;
+  bool showLabel = true;
+
+  int get _selected =>
+      widget.options[sliderVal.round().clamp(0, widget.options.length - 1)];
+
+  String get _label => widget.labelBuilder(_selected);
+
+  @override
+  void initState() {
+    super.initState();
+    _syncFromValue();
+  }
+
+  @override
+  void didUpdateWidget(covariant NumericOptionSliderTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value ||
+        oldWidget.options.length != widget.options.length) {
+      _syncFromValue();
+    }
+  }
+
+  void _syncFromValue() {
+    final index = widget.options.indexOf(widget.value);
+    sliderVal = (index >= 0 ? index : 0).toDouble();
+  }
+
+  void _commit() => widget.onChanged(_selected);
+
+  @override
+  Widget build(BuildContext context) {
+    final max = (widget.options.length - 1).toDouble();
+    final rawSlider = Slider(
+      value: sliderVal,
+      max: max,
+      divisions: widget.options.length > 1 ? widget.options.length - 1 : null,
+      label: _label,
+      onChanged: (double value) {
+        setState(() {
+          sliderVal = value;
+        });
+      },
+      onChangeStart: (double value) {
+        setState(() {
+          showLabel = false;
+        });
+      },
+      onChangeEnd: (double value) {
+        setState(() {
+          showLabel = true;
+        });
+        _commit();
+      },
+    );
+
+    final Widget slider = context.read<SettingsProvider>().isTV
+        ? Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.remove),
+                onPressed: sliderVal <= 0
+                    ? null
+                    : () {
+                        setState(() {
+                          sliderVal = (sliderVal - 1).clamp(0.0, max);
+                        });
+                        _commit();
+                      },
+              ),
+              Expanded(child: Text(_label, textAlign: TextAlign.center)),
+              IconButton(
+                icon: const Icon(Icons.add),
+                onPressed: sliderVal >= max
+                    ? null
+                    : () {
+                        setState(() {
+                          sliderVal = (sliderVal + 1).clamp(0.0, max);
+                        });
+                        _commit();
+                      },
+              ),
+            ],
+          )
+        : rawSlider;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        showLabel
+            ? Text('${widget.label}: $_label')
+            : const SizedBox(height: 20),
+        slider,
+      ],
+    );
+  }
+}
+
 class LegacyMaterialBridge extends StatelessWidget {
   final Widget child;
 
@@ -944,20 +1145,176 @@ class LegacyMaterialBridge extends StatelessWidget {
   }
 }
 
-class SectionHeader extends StatelessWidget {
-  final String title;
+/// A curated palette shared by the TV colour pickers (categories and the app
+/// accent colour).
+const List<Color> kPickerPalette = [
+  Color(0xFFEF5350),
+  Color(0xFFFF7043),
+  Color(0xFFFFA726),
+  Color(0xFFFFCA28),
+  Color(0xFF9CCC65),
+  Color(0xFF66BB6A),
+  Color(0xFF26A69A),
+  Color(0xFF26C6DA),
+  Color(0xFF29B6F6),
+  Color(0xFF42A5F5),
+  Color(0xFF5C6BC0),
+  Color(0xFF7E57C2),
+  Color(0xFFAB47BC),
+  Color(0xFFEC407A),
+  Color(0xFF8D6E63),
+  Color(0xFF78909C),
+];
 
-  const SectionHeader({super.key, required this.title});
+/// TV-friendly colour picker: a focusable palette (plus random) instead of
+/// the gesture-driven wheel, which a remote cannot operate. Returns the
+/// confirmed colour, or null when cancelled.
+Future<Color?> showTvColourPickerDialog(
+  BuildContext context, {
+  required Color initialColor,
+  required String title,
+  ValueChanged<Color>? onColorChanged,
+  List<Color> extraColors = const [],
+}) {
+  return showDialog<Color>(
+    context: context,
+    builder: (ctx) => _TvColourPickerDialog(
+      initialColor: initialColor,
+      title: title,
+      onColorChanged: onColorChanged,
+      extraColors: extraColors,
+    ),
+  );
+}
+
+class _TvColourPickerDialog extends StatefulWidget {
+  final Color initialColor;
+  final String title;
+  final ValueChanged<Color>? onColorChanged;
+  final List<Color> extraColors;
+
+  const _TvColourPickerDialog({
+    required this.initialColor,
+    required this.title,
+    this.onColorChanged,
+    this.extraColors = const [],
+  });
+
+  @override
+  State<_TvColourPickerDialog> createState() => _TvColourPickerDialogState();
+}
+
+class _TvColourPickerDialogState extends State<_TvColourPickerDialog> {
+  late Color _color = widget.initialColor;
+
+  void _pick(Color color) {
+    setState(() => _color = color);
+    widget.onColorChanged?.call(color);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-          fontWeight: FontWeight.bold,
-          color: Theme.of(context).colorScheme.primary,
+    final seen = <int>{};
+    final colors = <Color>[
+      for (final c in [
+        ...kPickerPalette,
+        ...widget.extraColors,
+        widget.initialColor,
+      ])
+        if (seen.add(c.toARGB32())) c,
+    ];
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SingleChildScrollView(
+        child: Wrap(
+          spacing: AppSpacings.elementGap,
+          runSpacing: AppSpacings.elementGap,
+          children: [
+            for (final c in colors)
+              _TvColourSwatch(
+                color: c,
+                selected: c.toARGB32() == _color.toARGB32(),
+                autofocus: c.toARGB32() == widget.initialColor.toARGB32(),
+                onTap: () => _pick(c),
+              ),
+            _TvColourSwatch(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              selected: false,
+              onTap: () => _pick(generateRandomLightColor()),
+              icon: Tooltip(
+                message: tr('randomColour'),
+                child: const Icon(Icons.casino_outlined, size: 20),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(tr('cancel')),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_color),
+          child: Text(tr('continue')),
+        ),
+      ],
+    );
+  }
+}
+
+class _TvColourSwatch extends StatelessWidget {
+  final Color color;
+  final bool selected;
+  final bool autofocus;
+  final VoidCallback onTap;
+  final Widget? icon;
+
+  const _TvColourSwatch({
+    required this.color,
+    required this.selected,
+    required this.onTap,
+    this.autofocus = false,
+    this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: TvFocusRing(
+        borderRadius: 24,
+        child: InkWell(
+          autofocus: autofocus,
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected ? cs.onSurface : cs.outlineVariant,
+                width: selected ? 3 : 1,
+              ),
+            ),
+            child: icon == null
+                ? (selected
+                      ? Icon(
+                          Icons.check,
+                          size: 20,
+                          color:
+                              ThemeData.estimateBrightnessForColor(color) ==
+                                  Brightness.dark
+                              ? Colors.white
+                              : Colors.black,
+                        )
+                      : null)
+                : Center(child: icon),
+          ),
         ),
       ),
     );

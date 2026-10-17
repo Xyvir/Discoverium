@@ -3,13 +3,15 @@ import 'dart:async';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flex_color_picker/flex_color_picker.dart';
-import 'package:shizuku_apk_installer/shizuku_apk_installer.dart';
+import 'package:shizuku_apk_installer/shizuku_apk_installer.dart'
+    hide InstallerMode;
 import 'package:obtainium/components/category_editor.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/components/generated_form_renderer.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
+import 'package:obtainium/installers/shizuku_installer.dart';
 import 'package:obtainium/main.dart';
 import 'package:obtainium/pages/import_export.dart';
 import 'package:obtainium/utils/nav_helper.dart';
@@ -22,6 +24,7 @@ import 'package:obtainium/providers/external_install_bridge.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
 import 'package:obtainium/theme.dart';
+import 'package:obtainium/utils/update_health.dart';
 import 'package:obtainium/utils/locale_utils.dart';
 import 'package:obtainium/utils/native_features.dart';
 import 'package:provider/provider.dart';
@@ -33,6 +36,7 @@ enum SettingsSection {
   import,
   export,
   updates,
+  updateHealth,
   repoApps,
   sourceSpecific,
   appearance,
@@ -113,6 +117,23 @@ class _SettingsPageState extends State<SettingsPage> {
     SettingsProvider settingsProvider,
     ColorSwatch<Object> obtainiumSwatch,
   ) async {
+    final titleText = tr(
+      'selectX',
+      args: [lowerCaseUnlessLang(tr('colour'), 'de')],
+    );
+    if (settingsProvider.isTV) {
+      final picked = await showTvColourPickerDialog(
+        context,
+        initialColor: settingsProvider.themeColor,
+        title: titleText,
+        extraColors: [obtainiumThemeColor],
+        onColorChanged: (color) {
+          settingsProvider.themeColor = color;
+          setState(() {});
+        },
+      );
+      return picked != null;
+    }
     final Map<ColorSwatch<Object>, String> colorsNameMap =
         <ColorSwatch<Object>, String>{obtainiumSwatch: 'Discoverium'};
     return ColorPicker(
@@ -138,17 +159,14 @@ class _SettingsPageState extends State<SettingsPage> {
         ColorPickerType.custom: tr('standard'),
         ColorPickerType.wheel: tr('custom'),
       },
-      title: Text(
-        tr('selectX', args: [lowerCaseUnlessLang(tr('colour'), 'de')]),
-        style: Theme.of(context).textTheme.titleLarge,
-      ),
+      title: Text(titleText, style: Theme.of(context).textTheme.titleLarge),
       wheelDiameter: 192,
       wheelSquareBorderRadius: 32,
       width: 48,
       height: 48,
-      borderRadius: 24,
-      spacing: 8,
-      runSpacing: 8,
+      borderRadius: AppRadii.large,
+      spacing: AppSpacings.elementGap,
+      runSpacing: AppSpacings.elementGap,
       enableShadesSelection: false,
       customColorSwatchesAndNames: colorsNameMap,
       showMaterialName: true,
@@ -195,7 +213,12 @@ class _SettingsPageState extends State<SettingsPage> {
       _installerCheckSeq++;
       final seq = _installerCheckSeq;
       ShizukuApkInstaller()
-          .checkPermission()
+          .setInstallerMode(
+            ShizukuInstaller.modeForSetting(
+              settingsProvider.shizukuInstallerMode,
+            ),
+          )
+          .then((_) => ShizukuApkInstaller().checkPermission())
           .then((resCode) {
             if (_installerCheckSeq != seq) return;
             settingsProvider.installerMode =
@@ -409,6 +432,9 @@ class _SettingsPageState extends State<SettingsPage> {
           return const [ExportSection()];
         case SettingsSection.updates:
           return _buildUpdatesSection(context, showBgSection, sdk);
+        case SettingsSection.updateHealth:
+          // Opened as its own page from the menu, never as a section.
+          return const [];
         case SettingsSection.repoApps:
           return _buildRepoAppsSection(context, settingsProvider);
         case SettingsSection.sourceSpecific:
@@ -422,7 +448,10 @@ class _SettingsPageState extends State<SettingsPage> {
           );
         case SettingsSection.categories:
           return const [
-            CardTile(padding: EdgeInsets.all(12), child: CategoryManager()),
+            CardTile(
+              padding: EdgeInsets.all(AppSpacings.md),
+              child: CategoryManager(),
+            ),
           ];
       }
     }
@@ -438,22 +467,24 @@ class _SettingsPageState extends State<SettingsPage> {
             title: section == null ? tr('settings') : _sectionTitle(section),
           ),
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+            padding: AppPaddings.page,
             sliver: SliverToBoxAdapter(
               child: loading
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 48),
                       child: Center(child: CircularProgressIndicator()),
                     )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      spacing: 3,
-                      children: section == null
-                          ? _buildSectionMenu(
-                              context,
-                              hasSourceSpecific: sourceSpecificForm != null,
-                            )
-                          : shapeCardTiles(childrenFor(section)),
+                  : TvInitialFocus(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        spacing: AppSpacings.connectedGap,
+                        children: section == null
+                            ? _buildSectionMenu(
+                                context,
+                                hasSourceSpecific: sourceSpecificForm != null,
+                              )
+                            : shapeCardTiles(childrenFor(section)),
+                      ),
                     ),
             ),
           ),
@@ -470,6 +501,7 @@ class _SettingsPageState extends State<SettingsPage> {
     SettingsSection.import => tr('obtainiumImport'),
     SettingsSection.export => tr('obtainiumExport'),
     SettingsSection.updates => tr('updates'),
+    SettingsSection.updateHealth => tr('updateHealth'),
     SettingsSection.repoApps => tr('repoApps'),
     SettingsSection.sourceSpecific => tr('sourceSpecific'),
     SettingsSection.appearance => tr('appearance'),
@@ -481,6 +513,7 @@ class _SettingsPageState extends State<SettingsPage> {
     SettingsSection.import => Icons.download_outlined,
     SettingsSection.export => Icons.upload_outlined,
     SettingsSection.updates => Icons.update_outlined,
+    SettingsSection.updateHealth => Icons.warning_amber_rounded,
     SettingsSection.repoApps => Icons.travel_explore_outlined,
     SettingsSection.sourceSpecific => Icons.source_outlined,
     SettingsSection.appearance => Icons.palette_outlined,
@@ -518,15 +551,29 @@ class _SettingsPageState extends State<SettingsPage> {
     // About is not a setting, so it sits after the rest rather than wherever
     // its translated title happens to sort.
     sections.add(SettingsSection.about);
+    final settingsProvider = context.read<SettingsProvider>();
+    final updateHealthAppCount = context
+        .watch<AppsProvider>()
+        .apps
+        .values
+        .map((e) => e.app)
+        .where((a) => hasUpdateHealthIssues(a, settingsProvider))
+        .length;
     return shapeCardTiles([
       for (final s in sections)
         ActionListTile(
           icon: _sectionIcon(s),
           label: _sectionTitle(s),
+          subtitle:
+              s == SettingsSection.updateHealth && updateHealthAppCount > 0
+              ? plural('apps', updateHealthAppCount)
+              : null,
           trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.of(
-            context,
-          ).push(MaterialPageRoute(builder: (_) => SettingsPage(section: s))),
+          onTap: () => s == SettingsSection.updateHealth
+              ? NavHelper.pushUpdateHealthPage(context)
+              : Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => SettingsPage(section: s)),
+                ),
         ),
     ]);
   }
@@ -695,23 +742,64 @@ class _SettingsPageState extends State<SettingsPage> {
               settingsProvider.enableBackgroundUpdates = value,
           helpWidgets: [
             Text(tr('backgroundUpdateReqsExplanation')),
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacings.elementGap),
             Text(tr('backgroundUpdateLimitsExplanation')),
           ],
         ),
-        if (settingsProvider.enableBackgroundUpdates)
-          ToggleTile(
-            label: tr('bgUpdatesOnWiFiOnly'),
-            value: settingsProvider.bgUpdatesOnWiFiOnly,
-            onChanged: (value) => settingsProvider.bgUpdatesOnWiFiOnly = value,
+        // The guards limit background checks as well as installs, so they
+        // apply whether or not background updates are on.
+        _fieldTile(
+          context,
+          TvDropdownMenu<BgGuardMode>(
+            expandedInsets: EdgeInsets.zero,
+            label: Text(tr('whenNotOnWiFi')),
+            initialSelection: settingsProvider.bgGuardOnWiFi,
+            dropdownMenuEntries: [
+              DropdownMenuEntry(
+                value: BgGuardMode.nothing,
+                label: tr('bgGuardNothing'),
+              ),
+              DropdownMenuEntry(
+                value: BgGuardMode.checksOnly,
+                label: tr('bgGuardChecksOnly'),
+              ),
+              DropdownMenuEntry(
+                value: BgGuardMode.checksAndUpdates,
+                label: tr('bgGuardChecksAndUpdates'),
+              ),
+            ],
+            onSelected: (value) {
+              if (value != null) settingsProvider.bgGuardOnWiFi = value;
+            },
           ),
-        if (settingsProvider.enableBackgroundUpdates)
-          ToggleTile(
-            label: tr('bgUpdatesWhileChargingOnly'),
-            value: settingsProvider.bgUpdatesWhileChargingOnly,
-            onChanged: (value) =>
-                settingsProvider.bgUpdatesWhileChargingOnly = value,
+        ),
+        _fieldTile(
+          context,
+          TvDropdownMenu<BgGuardMode>(
+            expandedInsets: EdgeInsets.zero,
+            label: Text(tr('whenNotCharging')),
+            initialSelection: settingsProvider.bgGuardWhileCharging,
+            dropdownMenuEntries: [
+              DropdownMenuEntry(
+                value: BgGuardMode.nothing,
+                label: tr('bgGuardNothing'),
+              ),
+              DropdownMenuEntry(
+                value: BgGuardMode.checksOnly,
+                label: tr('bgGuardChecksOnly'),
+              ),
+              DropdownMenuEntry(
+                value: BgGuardMode.checksAndUpdates,
+                label: tr('bgGuardChecksAndUpdates'),
+              ),
+            ],
+            onSelected: (value) {
+              if (value != null) {
+                settingsProvider.bgGuardWhileCharging = value;
+              }
+            },
           ),
+        ),
         if (settingsProvider.enableBackgroundUpdates)
           ToggleTile(
             label: tr('bgUpdatesWhileLockedOnly'),
@@ -752,6 +840,13 @@ class _SettingsPageState extends State<SettingsPage> {
         label: tr('checkUpdateOnDetailPage'),
         value: settingsProvider.checkUpdateOnDetailPage,
         onChanged: (value) => settingsProvider.checkUpdateOnDetailPage = value,
+      ),
+      ToggleTile(
+        label: tr('allowAddingAppsWithoutCheck'),
+        value: settingsProvider.allowAddingAppsWithoutCheck,
+        onChanged: (value) =>
+            settingsProvider.allowAddingAppsWithoutCheck = value,
+        helpWidgets: [Text(tr('allowAddingAppsWithoutCheckHelp'))],
       ),
       ToggleTile(
         label: tr('onlyCheckInstalledOrTrackOnlyApps'),
@@ -842,7 +937,7 @@ class _SettingsPageState extends State<SettingsPage> {
         subtitle: LinkText(
           text: tr('about'),
           url: 'https://github.com/privacyguides/verified-apps-android',
-          style: const TextStyle(fontSize: 12),
+          style: Theme.of(context).textTheme.bodySmall,
         ),
       ),
       _fieldTile(
@@ -876,6 +971,32 @@ class _SettingsPageState extends State<SettingsPage> {
           },
         ),
       ),
+      if (settingsProvider.installerMode == InstallerMode.shizuku.name)
+        _fieldTile(
+          context,
+          TvDropdownMenu<String>(
+            expandedInsets: EdgeInsets.zero,
+            label: Text(tr('shizukuBackend')),
+            initialSelection: settingsProvider.shizukuInstallerMode,
+            dropdownMenuEntries: [
+              DropdownMenuEntry(value: 'auto', label: tr('shizukuBackendAuto')),
+              DropdownMenuEntry(
+                value: 'shizuku',
+                label: tr('shizukuBackendShizuku'),
+              ),
+              DropdownMenuEntry(
+                value: 'dhizuku',
+                label: tr('shizukuBackendDhizuku'),
+              ),
+            ],
+            onSelected: (value) {
+              if (value != null) {
+                settingsProvider.shizukuInstallerMode = value;
+                settingsProvider.selectionClick();
+              }
+            },
+          ),
+        ),
       if (settingsProvider.installerMode == InstallerMode.shizuku.name)
         ToggleTile(
           label: tr('shizukuPretendToBeGooglePlay'),
@@ -1134,7 +1255,7 @@ class _ExternalInstallerTileState extends State<_ExternalInstallerTile> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: 8,
+            spacing: AppSpacings.elementGap,
             children: [
               for (var i = 0; i < entries.length; i++)
                 ConnectedCard(
@@ -1272,6 +1393,13 @@ class _ExternalInstallerTileState extends State<_ExternalInstallerTile> {
   }
 }
 
+String _themeColourLabel(Color color) {
+  final code = ColorTools.materialNameAndCode(color);
+  return code.startsWith('(')
+      ? '${ColorTools.nameThatColor(color)} $code'
+      : code;
+}
+
 class _ThemeColorPickerTile extends StatelessWidget {
   final Future<bool> Function(SettingsProvider, ColorSwatch<Object>)
   showColorPickerDialog;
@@ -1297,25 +1425,25 @@ class _ThemeColorPickerTile extends StatelessWidget {
         title: Text(
           tr('selectX', args: [lowerCaseUnlessLang(tr('colour'), 'de')]),
         ),
-        subtitle: Text(
-          '${ColorTools.nameThatColor(themeColor)} '
-          '(${ColorTools.materialNameAndCode(themeColor)})',
-        ),
-        trailing: ColorIndicator(
-          width: 40,
-          height: 40,
+        subtitle: Text(_themeColourLabel(themeColor)),
+        trailing: TvFocusRing(
           borderRadius: 20,
-          color: themeColor,
-          onSelectFocus: false,
-          onSelect: () async {
-            final Color colorBeforeDialog = themeColor;
-            if (!(await showColorPickerDialog(
-              settingsProvider,
-              obtainiumThemeColor.toSwatch(),
-            ))) {
-              handleColorPickerCancel(colorBeforeDialog, settingsProvider);
-            }
-          },
+          child: ColorIndicator(
+            width: 40,
+            height: 40,
+            borderRadius: 20,
+            color: themeColor,
+            onSelectFocus: false,
+            onSelect: () async {
+              final Color colorBeforeDialog = themeColor;
+              if (!(await showColorPickerDialog(
+                settingsProvider,
+                obtainiumThemeColor.toSwatch(),
+              ))) {
+                handleColorPickerCancel(colorBeforeDialog, settingsProvider);
+              }
+            },
+          ),
         ),
       ),
     );

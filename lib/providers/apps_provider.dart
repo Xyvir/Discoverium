@@ -29,6 +29,7 @@ import 'package:obtainium/providers/apps_provider_install.dart';
 import 'package:obtainium/providers/apps_provider_lifecycle.dart';
 import 'package:obtainium/providers/apps_provider_updates.dart';
 
+import 'package:obtainium/utils/bg_update_guards.dart';
 import 'package:obtainium/utils/signing_cert_utils.dart';
 import 'package:obtainium/utils/translation_loader.dart';
 
@@ -184,6 +185,7 @@ Future<File> downloadFileWithRetry(
   Map<String, String>? headers,
   int retries = _defaultRetries,
   CancellationToken? cancellationToken,
+  Future<bool> Function()? holdRetry,
 }) async {
   try {
     return await downloadFile(
@@ -208,6 +210,11 @@ Future<File> downloadFileWithRetry(
             e is TimeoutException ||
             e is HttpException ||
             retryableHTTPError)) {
+      // The hook may hold the retry back (see AppsProviderInstall) and returns
+      // false when retrying is pointless, so the original error is reported.
+      if (holdRetry != null && !await holdRetry()) {
+        rethrow;
+      }
       await Future.delayed(const Duration(seconds: _retryDelaySeconds));
       return await downloadFileWithRetry(
         fileName,
@@ -219,6 +226,7 @@ Future<File> downloadFileWithRetry(
         headers: headers,
         retries: (retries - 1),
         cancellationToken: cancellationToken,
+        holdRetry: holdRetry,
       );
     } else {
       rethrow;
@@ -827,6 +835,22 @@ Future<Directory> getAppStorageDir() async {
   return await getApplicationDocumentsDirectory();
 }
 
+Directory? selectPrimaryExternalCache(
+  List<Directory>? cacheDirs,
+  Directory? primaryExternal,
+) {
+  if (cacheDirs == null || cacheDirs.isEmpty || primaryExternal == null) {
+    return null;
+  }
+  final primaryDataDir = primaryExternal.absolute.parent.parent.path;
+  for (final dir in cacheDirs) {
+    if (dir.absolute.parent.parent.path == primaryDataDir) {
+      return dir;
+    }
+  }
+  return null;
+}
+
 class AppsProvider with ChangeNotifier {
   // Static, app-lifetime cross-instance save-notification bus; intentionally
   // never closed. The foreground instance subscribes so it can detect saves
@@ -992,27 +1016,26 @@ class AppsProvider with ChangeNotifier {
     }
     () async {
       await this.settingsProvider.initializeSettings();
-      var useExternalCache = false;
+      Directory? cacheRoot;
       try {
-        final cacheDirs = await getExternalCacheDirectories();
-        if (cacheDirs?.isNotEmpty ?? false) {
-          _apkDir = cacheDirs!.first;
-          _iconsCacheDir = Directory('${cacheDirs.first.path}/icons');
-          if (!_iconsCacheDir!.existsSync()) {
-            _iconsCacheDir!.createSync();
-          }
-          useExternalCache = true;
-        }
+        cacheRoot = selectPrimaryExternalCache(
+          await getExternalCacheDirectories(),
+          await getExternalStorageDirectory(),
+        );
       } catch (_) {}
-      if (!useExternalCache) {
-        _apkDir = Directory('${(await getAppStorageDir()).path}/apks');
-        if (!_apkDir!.existsSync()) {
-          _apkDir!.createSync();
-        }
-        _iconsCacheDir = Directory('${(await getAppStorageDir()).path}/icons');
-        if (!_iconsCacheDir!.existsSync()) {
-          _iconsCacheDir!.createSync();
-        }
+      if (cacheRoot == null) {
+        final internalCache = await getApplicationCacheDirectory();
+        _apkDir = Directory('${internalCache.path}/apks');
+        _iconsCacheDir = Directory('${internalCache.path}/icons');
+      } else {
+        _apkDir = cacheRoot;
+        _iconsCacheDir = Directory('${cacheRoot.path}/icons');
+      }
+      if (!_apkDir!.existsSync()) {
+        _apkDir!.createSync(recursive: true);
+      }
+      if (!_iconsCacheDir!.existsSync()) {
+        _iconsCacheDir!.createSync(recursive: true);
       }
       if (!isBg) {
         loadingApps = true;
@@ -1102,18 +1125,11 @@ Future<void> _runBGInstallMode(
     );
   } catch (e) {
     if (e is MultiAppMultiError) {
-      e.idsByErrorString.forEach((key, value) {
-        unawaited(
-          notificationsProvider.notify(
-            ErrorCheckingUpdatesNotification(
-              e.errorsAppsString(key, value),
-              // Distinct IDs per error group, offset from the update-check
-              // error range so one install failure doesn't replace another.
-              id: errorCheckingUpdatesNotificationId + 200 + key.hashCode.abs(),
-            ),
-          ),
-        );
-      });
+      unawaited(
+        notificationsProvider.notify(
+          ErrorCheckingUpdatesNotification(e.notificationErrorString()),
+        ),
+      );
     } else {
       AppLogger.error(e, message: 'Fatal error in BG install task');
       rethrow;
@@ -1192,24 +1208,39 @@ Future<void> bgUpdateCheck(
             .map((e) => MapEntry(e, 0))),
   ];
 
-  final networkRestricted =
-      appsProvider.settingsProvider.bgUpdatesOnWiFiOnly &&
-      !netResult.contains(ConnectivityResult.wifi) &&
-      !netResult.contains(ConnectivityResult.ethernet);
+  final onUnmeteredNetwork =
+      netResult.contains(ConnectivityResult.wifi) ||
+      netResult.contains(ConnectivityResult.ethernet);
+  final onCharging = (await Battery().batteryState) == BatteryState.charging;
 
-  final chargingRestricted =
-      appsProvider.settingsProvider.bgUpdatesWhileChargingOnly &&
-      (await Battery().batteryState) != BatteryState.charging;
+  final guardDecision = evaluateBgGuards(
+    wifiMode: appsProvider.settingsProvider.bgGuardOnWiFi,
+    chargingMode: appsProvider.settingsProvider.bgGuardWhileCharging,
+    onUnmeteredNetwork: onUnmeteredNetwork,
+    charging: onCharging,
+  );
 
-  if (networkRestricted) {
-    AppLogger.info('BG update task: Network restriction in effect.');
+  if (guardDecision.skipChecks) {
+    if (!forceAll) {
+      AppLogger.info(
+        'BG update task: Skipped (guards set to do nothing for the current network/charging state).',
+      );
+      return;
+    }
+    AppLogger.info('BG update task: Manual run overriding "do nothing" guard.');
+  } else if (!guardDecision.allowInstalls) {
+    AppLogger.info(
+      'BG update task: Restrictions in effect (checks only, no installs).',
+    );
   }
 
-  if (chargingRestricted) {
-    AppLogger.info('BG update task: Charging restriction in effect.');
+  final canInstall = canInstallInBackground(
+    forceAll: forceAll,
+    decision: guardDecision,
+  );
+  if (forceAll) {
+    AppLogger.info('BG update task: Manual run: checks only, no installs.');
   }
-
-  final canInstall = !networkRestricted && !chargingRestricted;
   final silentlyInstallable = <String>[];
 
   if (toCheck.isNotEmpty) {
@@ -1259,19 +1290,13 @@ Future<void> bgUpdateCheck(
     );
 
     if (result.toThrow.rawErrors.isNotEmpty && result.errors != null) {
-      for (var element in result.toThrow.idsByErrorString.entries) {
-        unawaited(
-          notificationsProvider.notify(
-            ErrorCheckingUpdatesNotification(
-              result.errors!.errorsAppsString(element.key, element.value),
-              id:
-                  errorCheckingUpdatesNotificationId +
-                  100 +
-                  element.key.hashCode.abs(),
-            ),
+      unawaited(
+        notificationsProvider.notify(
+          ErrorCheckingUpdatesNotification(
+            result.toThrow.notificationErrorString(),
           ),
-        );
-      }
+        ),
+      );
     }
   } else {
     AppLogger.info('BG update task: No apps due for checking.');
@@ -1298,7 +1323,7 @@ Future<void> bgUpdateCheck(
       'BG install task: Found ${silentlyInstallable.length} apps to install (${existing.length} from checks, ${silentlyInstallable.length - existing.length} pre-existing).',
     );
   }
-  if (params['toCheck'] == null) {
+  if (canInstall && params['toCheck'] == null) {
     // Installing replaces a running app and kills it, so unless the user has
     // opted out, hold the whole batch until the phone is locked. Most checks
     // have nothing to install, so only ask then.
@@ -1399,11 +1424,13 @@ _bgRunUpdateCheck(
       retryName,
       initialDelay: Duration(seconds: retryAfterXSeconds),
       constraints: Constraints(
-        networkType: appsProvider.settingsProvider.bgUpdatesOnWiFiOnly
+        networkType:
+            appsProvider.settingsProvider.bgGuardOnWiFi == BgGuardMode.nothing
             ? NetworkType.unmetered
             : NetworkType.connected,
         requiresCharging:
-            appsProvider.settingsProvider.bgUpdatesWhileChargingOnly,
+            appsProvider.settingsProvider.bgGuardWhileCharging ==
+            BgGuardMode.nothing,
         requiresBatteryNotLow: false,
         requiresDeviceIdle: false,
         requiresStorageNotLow: false,

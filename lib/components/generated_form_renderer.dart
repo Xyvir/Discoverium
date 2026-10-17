@@ -7,6 +7,7 @@ import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/components/generated_form_model.dart';
 import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/providers/settings_provider.dart';
+import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/format_utils.dart';
 import 'package:flutter_typeahead/flutter_typeahead.dart';
 import 'package:provider/provider.dart';
@@ -24,6 +25,7 @@ class GeneratedForm extends StatefulWidget {
     required this.onValueChanges,
     this.tileMode = false,
     this.noTilePadding = false,
+    this.autofocusFirstTextField = false,
   });
 
   final List<List<GeneratedFormItem>> items;
@@ -31,6 +33,10 @@ class GeneratedForm extends StatefulWidget {
 
   final bool tileMode;
   final bool noTilePadding;
+
+  /// On TV, focuses the first text field's wrapper when the form is built so
+  /// pages do not open without a focus ring.
+  final bool autofocusFirstTextField;
 
   @override
   State<GeneratedForm> createState() => _GeneratedFormState();
@@ -54,12 +60,14 @@ class TvTextFieldFocus extends StatefulWidget {
   final Widget child;
   final FocusNode textFocusNode;
   final double borderRadius;
+  final bool autofocus;
 
   const TvTextFieldFocus({
     super.key,
     required this.child,
     required this.textFocusNode,
     this.borderRadius = 4,
+    this.autofocus = false,
   });
 
   @override
@@ -74,6 +82,11 @@ class _TvTextFieldFocusState extends State<TvTextFieldFocus> {
   void initState() {
     super.initState();
     widget.textFocusNode.addListener(_onTextFocusChange);
+    if (widget.autofocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _outerFocus.requestFocus();
+      });
+    }
   }
 
   @override
@@ -194,6 +207,15 @@ class _GeneratedFormState extends State<GeneratedForm> {
     widget.onValueChanges(returnValues, valid, isBuilding);
   }
 
+  String? get _firstTextFieldKey {
+    for (final row in widget.items) {
+      for (final item in row) {
+        if (item is GeneratedFormTextField) return item.key;
+      }
+    }
+    return null;
+  }
+
   Widget _buildTextField(GeneratedFormTextField formItem) {
     final fieldKey = formItem.key;
     final formFieldKey = _fieldKeys.putIfAbsent(
@@ -242,7 +264,13 @@ class _GeneratedFormState extends State<GeneratedForm> {
           },
         );
         if (context.read<SettingsProvider>().isTV) {
-          return TvTextFieldFocus(textFocusNode: focusNode, child: textField);
+          return TvTextFieldFocus(
+            textFocusNode: focusNode,
+            autofocus:
+                widget.autofocusFirstTextField &&
+                formItem.key == _firstTextFieldKey,
+            child: textField,
+          );
         }
         return textField;
       },
@@ -253,7 +281,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
         child: Material(
           type: MaterialType.card,
           elevation: 4,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(AppRadii.xs),
           child: child,
         ),
       ),
@@ -278,7 +306,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
       return Text(tr('dropdownNoOptsError'));
     }
     return TvFocusRing(
-      borderRadius: 16,
+      borderRadius: AppRadii.medium,
       child: DropdownButtonFormField(
         decoration: _fieldDecoration(
           labelText: tr(formItem.label) + (formItem.required ? ' *' : ''),
@@ -348,7 +376,8 @@ class _GeneratedFormState extends State<GeneratedForm> {
     _subFormGenerations.clear();
     values = {
       for (final row in widget.items)
-        for (final item in row) item.key: item.value,
+        for (final item in row)
+          if (item is! GeneratedFormHeader) item.key: item.value,
     };
     for (final row in widget.items) {
       for (final item in row) {
@@ -459,7 +488,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacings.elementGap),
               ],
               GeneratedForm(
                 key: ValueKey('$fieldKey#$i#$generation'),
@@ -561,9 +590,16 @@ class _GeneratedFormState extends State<GeneratedForm> {
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 3,
+      spacing: AppSpacings.connectedGap,
       children: cards,
     );
+  }
+
+  Widget _buildHeader(GeneratedFormHeader item) {
+    final header = SectionHeader(tr(item.label));
+    return item.id == null
+        ? header
+        : KeyedSubtree(key: GlobalObjectKey(item.id!), child: header);
   }
 
   Widget _buildItem(
@@ -571,6 +607,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
     required bool isFirst,
     required bool isLast,
   }) {
+    if (item is GeneratedFormHeader) return _buildHeader(item);
     if (item is GeneratedFormTextField) return _buildTextField(item);
     if (item is GeneratedFormDropdown) return _buildDropdown(item);
     if (item is GeneratedFormSlider) return _buildSlider(item);
@@ -635,17 +672,20 @@ class _GeneratedFormState extends State<GeneratedForm> {
       bool isSubFormRow(int r) =>
           widget.items[r].isNotEmpty &&
           widget.items[r][0] is GeneratedFormSubForm;
+      bool isHeaderRow(int r) =>
+          widget.items[r].isNotEmpty &&
+          widget.items[r][0] is GeneratedFormHeader;
       final colorScheme = Theme.of(context).colorScheme;
       final n = inputRowWidgets.length;
       final List<Widget> rawTiles = [];
       for (var r = 0; r < n; r++) {
-        if (isSubFormRow(r)) {
+        if (isSubFormRow(r) || isHeaderRow(r)) {
           rawTiles.add(inputRowWidgets[r]);
         } else {
           rawTiles.add(
             ConnectedCard(
-              isFirst: r == 0,
-              isLast: r == n - 1,
+              isFirst: r == 0 || isHeaderRow(r - 1),
+              isLast: r == n - 1 || isHeaderRow(r + 1),
               color: isFieldRow(r)
                   ? colorScheme.surfaceContainerHighest
                   : colorScheme.surfaceContainerLow,
@@ -656,7 +696,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
       }
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: 3,
+        spacing: AppSpacings.connectedGap,
         children: rawTiles,
       );
     }
@@ -664,7 +704,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
     final List<Widget> children = [];
     for (var r = 0; r < inputRowWidgets.length; r++) {
       if (r > 0) {
-        children.add(const SizedBox(height: 8));
+        children.add(const SizedBox(height: AppSpacings.elementGap));
       }
       children.add(inputRowWidgets[r]);
     }
@@ -700,7 +740,9 @@ class _SliderFormItemState extends State<_SliderFormItem> {
 
   String _optLabel(MapEntry<String, String> opt) {
     final days = int.tryParse(opt.value);
-    return days != null ? plural('day', days) : formOptLabel(opt.value);
+    return days != null
+        ? plural(widget.formItem.numericLabelUnitKey, days)
+        : formOptLabel(opt.value);
   }
 
   String get _label => _optLabel(opts[_index]);
@@ -773,7 +815,7 @@ class _SliderFormItemState extends State<_SliderFormItem> {
           );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+      padding: AppPaddings.sliderTile,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

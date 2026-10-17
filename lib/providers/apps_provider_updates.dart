@@ -2,15 +2,18 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:obtainium/core/logging/app_logger.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/utils/update_health.dart';
 
 /// Update checking and pending-update bookkeeping for [AppsProvider].
 extension AppsProviderUpdates on AppsProvider {
   /// Fetches the latest [App] metadata from its source WITHOUT persisting it.
-  /// Returns null if the app is missing or has a pending repo rename.
+  /// Returns null if the app is missing, disabled, or has a pending repo
+  /// rename.
   ///
   /// Keeping fetch and save separate lets [checkUpdates] batch many checks into
   /// a few [saveApps] calls instead of saving (and triggering a full UI
@@ -18,7 +21,9 @@ extension AppsProviderUpdates on AppsProvider {
   Future<App?> fetchUpdate(String appId) async {
     final App? currentApp = apps[appId]?.app;
     // Pause update checks until the user resolves a pending repo rename.
-    if (currentApp == null || currentApp.hasPendingRepoRename) {
+    if (currentApp == null ||
+        currentApp.disabled ||
+        currentApp.hasPendingRepoRename) {
       return null;
     }
     final SourceProvider sourceProvider = SourceProvider();
@@ -47,7 +52,16 @@ extension AppsProviderUpdates on AppsProvider {
     }
     // Whether there is an update rests on the version the APK itself declares,
     // so that is read here, after the hold has settled which APK is offered.
-    return resolveLatestApkVersion(newApp, previous: currentApp);
+    newApp = await resolveLatestApkVersion(newApp, previous: currentApp);
+    newApp = newApp.copyWith(
+      consecutiveFailedChecks: 0,
+      latestVersionChangedAt:
+          newApp.latestVersion != currentApp.latestVersion ||
+              currentApp.latestVersionChangedAt == null
+          ? DateTime.now()
+          : currentApp.latestVersionChangedAt,
+    );
+    return newApp;
   }
 
   /// Holds [newApp] back at [currentApp]'s release while the newly found one
@@ -79,6 +93,7 @@ extension AppsProviderUpdates on AppsProvider {
       changeLog: currentApp.changeLog,
       apkUrls: currentApp.apkUrls,
       otherAssetUrls: currentApp.otherAssetUrls,
+      apkSizeBytes: currentApp.apkSizeBytes,
       recentReleases: currentApp.recentReleases,
       heldVersion: newApp.latestVersion,
       heldReleaseDate: releaseDate,
@@ -132,7 +147,10 @@ extension AppsProviderUpdates on AppsProvider {
     final minAge = DateTime.now().subtract(
       Duration(minutes: settingsProvider.updateInterval),
     );
+    final excludedCategories = settingsProvider.categoriesExcludedFromChecks;
     final List<String> appIds = apps.values
+        .where((app) => !app.app.disabled)
+        .where((app) => !app.app.categories.any(excludedCategories.contains))
         .where(
           (app) =>
               forceAll ||
@@ -199,6 +217,28 @@ extension AppsProviderUpdates on AppsProvider {
         );
       }
       total = appIds.length;
+      final prefetchGroups = <AppSource, List<App>>{};
+      final sourceProvider = SourceProvider();
+      for (final appId in appIds) {
+        final app = apps[appId]?.app;
+        if (app == null) continue;
+        try {
+          final source = sourceProvider.getSource(
+            app.url,
+            overrideSource: app.overrideSource,
+          );
+          prefetchGroups.putIfAbsent(source, () => []).add(app);
+        } on ObtainiumError {
+          // The per-app check surfaces unsupported URLs.
+        }
+      }
+      for (final group in prefetchGroups.entries) {
+        try {
+          await group.key.prefetchUpdateInfo(group.value);
+        } catch (e) {
+          AppLogger.info('Update prefetch failed: $e');
+        }
+      }
       final List<App> fetched = [];
       // Apps whose check failed: their check time is still advanced so the
       // background task doesn't retry them every 15 minutes; they become due
@@ -236,7 +276,14 @@ extension AppsProviderUpdates on AppsProvider {
             errors.add(appId, e, appName: apps[appId]?.name);
             final app = apps[appId]?.app;
             if (app != null) {
-              failedApps.add(app.copyWith(lastUpdateCheck: DateTime.now()));
+              failedApps.add(
+                app.copyWith(
+                  lastUpdateCheck: DateTime.now(),
+                  consecutiveFailedChecks: shouldCountFailedCheck(e)
+                      ? app.consecutiveFailedChecks + 1
+                      : app.consecutiveFailedChecks,
+                ),
+              );
             }
           }
         }
@@ -309,6 +356,7 @@ extension AppsProviderUpdates on AppsProvider {
     final List<String> updateAppIds = [];
     for (final appId in apps.keys) {
       final app = apps[appId]!.app;
+      if (app.disabled) continue;
       if (installedOnly) {
         if (appHasOfferableUpdate(app, settingsProvider)) {
           updateAppIds.add(app.id);

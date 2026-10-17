@@ -12,6 +12,7 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/notifications_provider.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/nav_helper.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher_string.dart';
@@ -267,15 +268,53 @@ class AddAppPageState extends State<AddAppPage> {
       if (confirmed) {
         final s = pickedSource!;
         final trackOnly = s.enforceTrackOnly || userPickedTrackOnly;
-        app = await sourceProvider.getApp(
-          s,
-          userInput.trim(),
-          additionalSettings,
-          trackOnlyOverride: trackOnly,
-          sourceIsOverriden: pickedSourceOverride != null,
-          inferAppIdIfOptional: inferAppIdIfOptional,
-        );
-        if (isTempId(app) && !app.settings.getBool('trackOnly')) {
+        var addedWithoutCheck = false;
+        try {
+          app = await sourceProvider.getApp(
+            s,
+            userInput.trim(),
+            additionalSettings,
+            trackOnlyOverride: trackOnly,
+            sourceIsOverriden: pickedSourceOverride != null,
+            inferAppIdIfOptional: inferAppIdIfOptional,
+          );
+        } catch (e) {
+          // Only offer the fallback for unexpected failures (network issues,
+          // source bugs); typed errors mean the source was reachable and the
+          // user should see the real problem.
+          final unexpected = e is! ObtainiumError || e.unexpected;
+          if (!unexpected || !settingsProvider.allowAddingAppsWithoutCheck) {
+            rethrow;
+          }
+          if (!context.mounted) return;
+          final proceed = await showConfirmDialog(
+            context,
+            title: tr('addWithoutCheckQuestion'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(tr('addWithoutCheckExplanation')),
+                const SizedBox(height: AppSpacings.elementGap),
+                Text('$e'),
+              ],
+            ),
+            confirmText: tr('addAnyway'),
+            autofocusConfirm: settingsProvider.isTV,
+          );
+          if (!proceed) return;
+          if (!context.mounted) return;
+          app = sourceProvider.buildPlaceholderApp(
+            s,
+            userInput.trim(),
+            additionalSettings,
+            sourceIsOverriden: pickedSourceOverride != null,
+          );
+          addedWithoutCheck = true;
+        }
+        if (!addedWithoutCheck &&
+            isTempId(app) &&
+            !app.settings.getBool('trackOnly')) {
           if (!context.mounted) return;
           final apkUrl = await appsProvider.confirmAppFileUrl(
             app,
@@ -316,7 +355,7 @@ class AddAppPageState extends State<AddAppPage> {
             '${tr('appAlreadyAdded')}: ${existing?.app.name ?? app.id} (${app.id})',
           );
         }
-        if (app.settings.getBool('trackOnly')) {
+        if (!addedWithoutCheck && app.settings.getBool('trackOnly')) {
           app = app.copyWith(installedVersion: app.latestVersion);
         }
         app = await appsProvider.resolveLatestApkVersionIfPossible(app);
@@ -534,8 +573,8 @@ class AddAppPageState extends State<AddAppPage> {
           items: const [],
           additionalWidgets: [
             Wrap(
-              spacing: 8,
-              runSpacing: 8,
+              spacing: AppSpacings.elementGap,
+              runSpacing: AppSpacings.elementGap,
               children: sourceProvider.sources.map((e) {
                 return ActionChip(
                   label: Text(
@@ -618,6 +657,9 @@ class AddAppPageState extends State<AddAppPage> {
             additionalSettings = values;
             additionalSettingsValid = valid;
           });
+        } else {
+          additionalSettings = values;
+          additionalSettingsValid = valid;
         }
       },
     );
@@ -629,19 +671,19 @@ class AddAppPageState extends State<AddAppPage> {
   ) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      const SizedBox(height: 16),
+      const SizedBox(height: AppSpacings.lg),
       Text(
         tr('additionalOptsFor', args: [pickedSource?.name ?? tr('source')]),
-        style: TextStyle(
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
           color: Theme.of(context).colorScheme.primary,
-          fontWeight: FontWeight.bold,
+          fontWeight: FontWeight.w600,
         ),
       ),
-      const SizedBox(height: 16),
+      const SizedBox(height: AppSpacings.sm),
       _buildSourceSpecificForm(settingsProvider),
-      const SizedBox(height: 12),
+      const SizedBox(height: AppSpacings.md),
       CardTile(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacings.md),
         child: CategorySelector(
           selected: pickedCategories.toSet(),
           alignment: WrapAlignment.start,
@@ -725,7 +767,7 @@ class AddAppPageState extends State<AddAppPage> {
     child: Wrap(
       direction: Axis.horizontal,
       alignment: WrapAlignment.spaceBetween,
-      spacing: 12,
+      spacing: AppSpacings.md,
       children: [
         ActionChip(
           onPressed: () {
@@ -802,6 +844,7 @@ class AddAppPageState extends State<AddAppPage> {
           child: GeneratedForm(
             key: Key('url-$urlInputKey'),
             tileMode: true,
+            autofocusFirstTextField: settingsProvider.isTV,
             items: [
               [
                 GeneratedFormTextField(
@@ -839,7 +882,7 @@ class AddAppPageState extends State<AddAppPage> {
             },
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: AppSpacings.elementGap),
         gettingAppInfo
             ? _smallSpinner()
             : IconButton(
@@ -921,7 +964,7 @@ class AddAppPageState extends State<AddAppPage> {
             },
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: AppSpacings.elementGap),
         searching
             ? _smallSpinner()
             : IconButton(
@@ -944,7 +987,7 @@ class AddAppPageState extends State<AddAppPage> {
             child: ConnectedCard(
               isFirst: true,
               isLast: true,
-              padding: const EdgeInsets.all(16),
+              padding: AppPaddings.cardInner,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -974,7 +1017,7 @@ class AddAppPageState extends State<AddAppPage> {
 
   Widget _smallSpinner() {
     return const Padding(
-      padding: EdgeInsets.all(12),
+      padding: EdgeInsets.all(AppSpacings.md),
       child: SizedBox(
         width: 20,
         height: 20,

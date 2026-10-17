@@ -13,6 +13,7 @@ import 'package:obtainium/utils/format_utils.dart';
 import 'package:obtainium/providers/notifications_provider.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/utils/update_health.dart';
 import 'package:obtainium/utils/nav_helper.dart';
 // AppsFilter and AppListBuilder are defined below in this file.
 import 'package:provider/provider.dart';
@@ -169,6 +170,41 @@ class _AppIconWidgetState extends State<AppIconWidget> {
   }
 }
 
+/// Card-wrapped app row used by the main apps list, reused by other lists of
+/// apps (e.g. Update health) so their spacing matches.
+class AppListRowCard extends StatelessWidget {
+  final Widget child;
+
+  const AppListRowCard({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: AppPaddings.listOuter,
+      child: Card(clipBehavior: Clip.antiAlias, child: child),
+    );
+  }
+}
+
+/// Density-dependent [ListTile] metrics of app rows, derived from the user's
+/// app-list density setting. Shared so other app lists match the main one.
+class AppTileMetrics {
+  final AppListDensity density;
+
+  const AppTileMetrics(this.density);
+
+  bool get isCompact => density == AppListDensity.compact;
+  bool get isDense => density == AppListDensity.dense;
+  bool get isStandard => density == AppListDensity.standard;
+
+  VisualDensity? get visualDensity =>
+      isStandard ? null : const VisualDensity(horizontal: -4, vertical: -4);
+
+  double get minVerticalPadding => isDense ? 0 : (isCompact ? 2 : 4);
+
+  double get iconSize => isCompact ? 36 : 44;
+}
+
 class AppListTile extends StatelessWidget {
   final AppInMemory appInMemory;
   final SettingsProvider settingsProvider;
@@ -242,7 +278,7 @@ class AppListTile extends StatelessWidget {
         disabledForegroundColor: cs.onSurface.withValues(alpha: 0.38),
         visualDensity: VisualDensity.compact,
         shape: RoundedSuperellipseBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(AppRadii.medium),
         ),
       ),
       icon: Icon(trackOnly ? Icons.check_rounded : Icons.download_rounded),
@@ -267,7 +303,7 @@ class AppListTile extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.info_outline, color: infoColor, size: 14),
+          Icon(Icons.info_outline, color: infoColor, size: AppIconSizes.small),
           const SizedBox(width: 4),
           Flexible(
             child: Text(
@@ -289,10 +325,21 @@ class AppListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final showChangesFn = getChangeLogFn(context, _app);
-    final hasUpdate = appHasOfferableUpdate(
-      _app,
-      context.read<SettingsProvider>(),
+    final hasUpdate =
+        !_app.disabled &&
+        appHasOfferableUpdate(_app, context.read<SettingsProvider>());
+    final updateHealthConfig = resolveUpdateHealthConfig(
+      _app.additionalSettings,
+      settingsProvider,
     );
+    final updateHealthReasons = settingsProvider.showUpdateHealthIndicator
+        ? evaluateUpdateHealthReasons(_app, updateHealthConfig)
+        : const <UpdateHealthReason>[];
+    final showUpdateHealthIndicator =
+        updateHealthReasons.isNotEmpty &&
+        !_app.disabled &&
+        !_app.hasPendingRepoRename &&
+        !isUpdateHealthIgnored(_app);
     // The button keeps its space whether or not there is an update, so the
     // text block beside it starts and ends on the same pixels in both states.
     final Widget trailingRow = Visibility(
@@ -328,7 +375,7 @@ class AppListTile extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(Icons.install_mobile, color: cs.onPrimaryContainer),
-                const SizedBox(width: 8),
+                const SizedBox(width: AppSpacings.elementGap),
                 Text(
                   tr('install'),
                   style: TextStyle(color: cs.onPrimaryContainer),
@@ -348,7 +395,7 @@ class AppListTile extends StatelessWidget {
                   Icons.system_update_alt_rounded,
                   color: cs.onPrimaryContainer,
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: AppSpacings.elementGap),
                 Text(
                   tr('update'),
                   style: TextStyle(color: cs.onPrimaryContainer),
@@ -451,13 +498,44 @@ class AppListTile extends StatelessWidget {
                                 mainAxisSize: MainAxisSize.min,
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    appInMemory.name,
-                                    style: TextStyle(
-                                      fontWeight: _app.pinned
-                                          ? FontWeight.bold
-                                          : FontWeight.normal,
-                                    ),
+                                  Row(
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          appInMemory.name,
+                                          style: TextStyle(
+                                            fontWeight: _app.pinned
+                                                ? FontWeight.bold
+                                                : FontWeight.normal,
+                                          ),
+                                        ),
+                                      ),
+                                      if (showUpdateHealthIndicator)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            left: 4,
+                                          ),
+                                          child: Tooltip(
+                                            message: updateHealthReasons
+                                                .map(
+                                                  (r) =>
+                                                      updateHealthReasonLabel(
+                                                        r,
+                                                        _app,
+                                                        updateHealthConfig,
+                                                      ),
+                                                )
+                                                .join('\n'),
+                                            child: Icon(
+                                              Icons.warning_amber_rounded,
+                                              size: AppIconSizes.small,
+                                              color: Theme.of(
+                                                context,
+                                              ).colorScheme.error,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
                                   ),
                                   _authorText(),
                                   if (_app.hasPendingRepoRename)
@@ -493,6 +571,9 @@ class AppListTile extends StatelessWidget {
                   ),
                 ),
               );
+              final tileChild = _app.disabled
+                  ? Opacity(opacity: 0.5, child: tile)
+                  : tile;
               if (settingsProvider.isTV) {
                 return TvFocusRing(
                   borderRadius:
@@ -509,12 +590,12 @@ class AppListTile extends StatelessWidget {
                             },
                           ),
                         ),
-                      Expanded(child: tile),
+                      Expanded(child: tileChild),
                     ],
                   ),
                 );
               }
-              return tile;
+              return tileChild;
             }(),
           ),
         );
@@ -595,7 +676,7 @@ class DownloadProgressTrailing extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(AppRadii.xs),
                   child: LinearProgressIndicator(
                     value: installing ? null : progress / 100,
                   ),
@@ -660,12 +741,12 @@ class AppListGroupSection extends StatelessWidget {
     );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      padding: AppPaddings.listOuter,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         // Small gaps so entries read as distinct positional tiles, matching the
         // connected-tile look used for settings.
-        spacing: 3,
+        spacing: AppSpacings.connectedGap,
         children: [
           segment(
             0,
@@ -924,8 +1005,11 @@ class AppListBuilder {
     final tempRenamed = <AppInMemory>[];
     final tempPinned = <AppInMemory>[];
     final tempNotPinned = <AppInMemory>[];
+    final tempDisabled = <AppInMemory>[];
     for (var a in apps) {
-      if (a.app.hasPendingRepoRename) {
+      if (a.app.disabled) {
+        tempDisabled.add(a);
+      } else if (a.app.hasPendingRepoRename) {
         tempRenamed.add(a);
       } else if (a.app.pinned) {
         tempPinned.add(a);
@@ -933,7 +1017,7 @@ class AppListBuilder {
         tempNotPinned.add(a);
       }
     }
-    apps = [...tempRenamed, ...tempPinned, ...tempNotPinned];
+    apps = [...tempRenamed, ...tempPinned, ...tempNotPinned, ...tempDisabled];
 
     return apps;
   }
@@ -954,7 +1038,8 @@ class _VersionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = appInMemory.app;
-    final hasUpdate = appHasOfferableUpdate(app, settingsProvider);
+    final hasUpdate =
+        !app.disabled && appHasOfferableUpdate(app, settingsProvider);
     final updateColor = hasUpdate
         ? Theme.of(context).colorScheme.primary
         : Theme.of(context).colorScheme.onSurfaceVariant;
@@ -999,7 +1084,7 @@ class _VersionLabel extends StatelessWidget {
         changes = DecoratedBox(
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(AppRadii.small),
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -1011,7 +1096,7 @@ class _VersionLabel extends StatelessWidget {
       // tile: a full-width tap target here would swallow taps meant to open
       // the app.
       changes = InkWell(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(AppRadii.small),
         onTap: showChangesFn,
         child: changes,
       );
@@ -1033,6 +1118,9 @@ class _VersionLabel extends StatelessWidget {
   bool isVersionUpdate(App app) => appHasOfferableUpdate(app, settingsProvider);
 
   String installedVersionText(App app) {
+    if (app.disabled) {
+      return tr('disabled');
+    }
     final installed = app.installedVersion;
     final latest = app.latestVersionName ?? app.latestVersion;
     if (isVersionUpdate(app)) {

@@ -53,6 +53,17 @@ class APKDetails {
   /// page can render neighbouring versions without asking the network.
   final List<ReleaseNotes> recentReleases;
 
+  /// Package name when the source can infer it (e.g. APKMirror's feed icon),
+  /// so callers can resolve an app ID without a second request.
+  final String? appId;
+
+  /// Download size in bytes when the source can resolve it (e.g. APKMirror's
+  /// release page) and the app has no direct APK URL to probe.
+  final int? apkSizeBytes;
+
+  final bool? isArchived;
+  final int? newerReleasesFilteredOut;
+
   const APKDetails(
     this.version,
     this.apkUrls,
@@ -62,6 +73,10 @@ class APKDetails {
     this.releaseUrl,
     this.allAssetUrls = const [],
     this.recentReleases = const [],
+    this.appId,
+    this.apkSizeBytes,
+    this.isArchived,
+    this.newerReleasesFilteredOut,
   });
 
   APKDetails copyWith({
@@ -73,6 +88,10 @@ class APKDetails {
     Object? releaseUrl = _sentinel,
     List<MapEntry<String, String>>? allAssetUrls,
     List<ReleaseNotes>? recentReleases,
+    Object? appId = _sentinel,
+    Object? apkSizeBytes = _sentinel,
+    Object? isArchived = _sentinel,
+    Object? newerReleasesFilteredOut = _sentinel,
   }) {
     return APKDetails(
       version ?? this.version,
@@ -87,6 +106,16 @@ class APKDetails {
           : releaseUrl as String?,
       allAssetUrls: allAssetUrls ?? this.allAssetUrls,
       recentReleases: recentReleases ?? this.recentReleases,
+      appId: appId == _sentinel ? this.appId : appId as String?,
+      apkSizeBytes: apkSizeBytes == _sentinel
+          ? this.apkSizeBytes
+          : apkSizeBytes as int?,
+      isArchived: isArchived == _sentinel
+          ? this.isArchived
+          : isArchived as bool?,
+      newerReleasesFilteredOut: newerReleasesFilteredOut == _sentinel
+          ? this.newerReleasesFilteredOut
+          : newerReleasesFilteredOut as int?,
     );
   }
 }
@@ -151,6 +180,7 @@ class App {
   final Map<String, dynamic> additionalSettings;
   final DateTime? lastUpdateCheck;
   final bool pinned;
+  final bool disabled;
   final List<String> categories;
   final DateTime? releaseDate;
   final String? changeLog;
@@ -170,6 +200,13 @@ class App {
   final String? overrideSource;
   final bool allowIdChange;
   final String? pendingRepoRenameUrl;
+  final int? apkSizeBytes;
+  final DateTime? latestVersionChangedAt;
+  final int consecutiveFailedChecks;
+  final bool? isArchived;
+  final int? newerReleasesFilteredOut;
+  final bool updateHealthEnabled;
+  final String? updateHealthDismissedVersion;
 
   const App({
     required this.id,
@@ -190,6 +227,7 @@ class App {
     required this.additionalSettings,
     this.lastUpdateCheck,
     this.pinned = false,
+    this.disabled = false,
     this.categories = const [],
     this.releaseDate,
     this.changeLog,
@@ -200,6 +238,13 @@ class App {
     this.overrideSource,
     this.allowIdChange = false,
     this.pendingRepoRenameUrl,
+    this.apkSizeBytes,
+    this.latestVersionChangedAt,
+    this.consecutiveFailedChecks = 0,
+    this.isArchived,
+    this.newerReleasesFilteredOut,
+    this.updateHealthEnabled = true,
+    this.updateHealthDismissedVersion,
   });
 
   @override
@@ -257,6 +302,7 @@ class App {
     Map<String, dynamic>? additionalSettings,
     Object? lastUpdateCheck = _sentinel,
     bool? pinned,
+    bool? disabled,
     List<String>? categories,
     Object? releaseDate = _sentinel,
     Object? changeLog = _sentinel,
@@ -267,6 +313,13 @@ class App {
     Object? overrideSource = _sentinel,
     bool? allowIdChange,
     Object? pendingRepoRenameUrl = _sentinel,
+    Object? apkSizeBytes = _sentinel,
+    Object? latestVersionChangedAt = _sentinel,
+    int? consecutiveFailedChecks,
+    Object? isArchived = _sentinel,
+    Object? newerReleasesFilteredOut = _sentinel,
+    bool? updateHealthEnabled,
+    Object? updateHealthDismissedVersion = _sentinel,
   }) {
     return App(
       id: id ?? this.id,
@@ -305,6 +358,7 @@ class App {
           ? this.lastUpdateCheck
           : lastUpdateCheck as DateTime?,
       pinned: pinned ?? this.pinned,
+      disabled: disabled ?? this.disabled,
       categories: categories ?? List<String>.from(this.categories),
       releaseDate: releaseDate == _sentinel
           ? this.releaseDate
@@ -327,6 +381,24 @@ class App {
       pendingRepoRenameUrl: pendingRepoRenameUrl == _sentinel
           ? this.pendingRepoRenameUrl
           : pendingRepoRenameUrl as String?,
+      apkSizeBytes: apkSizeBytes == _sentinel
+          ? this.apkSizeBytes
+          : apkSizeBytes as int?,
+      latestVersionChangedAt: latestVersionChangedAt == _sentinel
+          ? this.latestVersionChangedAt
+          : latestVersionChangedAt as DateTime?,
+      consecutiveFailedChecks:
+          consecutiveFailedChecks ?? this.consecutiveFailedChecks,
+      isArchived: isArchived == _sentinel
+          ? this.isArchived
+          : isArchived as bool?,
+      newerReleasesFilteredOut: newerReleasesFilteredOut == _sentinel
+          ? this.newerReleasesFilteredOut
+          : newerReleasesFilteredOut as int?,
+      updateHealthEnabled: updateHealthEnabled ?? this.updateHealthEnabled,
+      updateHealthDismissedVersion: updateHealthDismissedVersion == _sentinel
+          ? this.updateHealthDismissedVersion
+          : updateHealthDismissedVersion as String?,
     );
   }
 
@@ -364,6 +436,7 @@ class App {
             ? null
             : DateTime.fromMicrosecondsSinceEpoch(json['lastUpdateCheck']),
         pinned: json['pinned'] ?? false,
+        disabled: json['disabled'] ?? false,
         categories: json['categories'] != null
             ? (json['categories'] as List<dynamic>)
                   .map((e) => e.toString())
@@ -393,6 +466,18 @@ class App {
           jsonDecode((json['otherAssetUrls'] ?? '[]')),
         ),
         pendingRepoRenameUrl: json['pendingRepoRenameUrl'] as String?,
+        apkSizeBytes: json['apkSizeBytes'] as int?,
+        latestVersionChangedAt: json['latestVersionChangedAt'] == null
+            ? null
+            : DateTime.fromMicrosecondsSinceEpoch(
+                json['latestVersionChangedAt'],
+              ),
+        consecutiveFailedChecks: json['consecutiveFailedChecks'] ?? 0,
+        isArchived: json['isArchived'] as bool?,
+        newerReleasesFilteredOut: json['newerReleasesFilteredOut'] as int?,
+        updateHealthEnabled: json['updateHealthEnabled'] ?? true,
+        updateHealthDismissedVersion:
+            json['updateHealthDismissedVersion'] as String?,
       );
     } on TypeError catch (e) {
       AppLogger.error(
@@ -423,6 +508,7 @@ class App {
     'additionalSettings': jsonEncode(additionalSettings),
     'lastUpdateCheck': lastUpdateCheck?.microsecondsSinceEpoch,
     'pinned': pinned,
+    'disabled': disabled,
     'categories': categories,
     'releaseDate': releaseDate?.microsecondsSinceEpoch,
     'changeLog': changeLog,
@@ -435,6 +521,13 @@ class App {
     'overrideSource': overrideSource,
     'allowIdChange': allowIdChange,
     'pendingRepoRenameUrl': pendingRepoRenameUrl,
+    'apkSizeBytes': apkSizeBytes,
+    'latestVersionChangedAt': latestVersionChangedAt?.microsecondsSinceEpoch,
+    'consecutiveFailedChecks': consecutiveFailedChecks,
+    'isArchived': isArchived,
+    'newerReleasesFilteredOut': newerReleasesFilteredOut,
+    'updateHealthEnabled': updateHealthEnabled,
+    'updateHealthDismissedVersion': updateHealthDismissedVersion,
   };
 }
 

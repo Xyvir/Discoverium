@@ -13,6 +13,7 @@ import 'package:obtainium/providers/source_provider.dart';
 import 'package:obtainium/utils/native_features.dart';
 import 'package:obtainium/pages/home.dart';
 import 'package:obtainium/theme.dart';
+import 'package:obtainium/utils/dynamic_color_utils.dart';
 import 'package:provider/provider.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -22,6 +23,7 @@ import 'package:workmanager/workmanager.dart';
 
 List<MapEntry<Locale, String>> supportedLocales = const [
   MapEntry(Locale('en'), 'English'),
+  MapEntry(Locale('bn'), 'বাংলা'),
   MapEntry(Locale('zh', 'Hant_TW'), '臺灣話'),
   MapEntry(Locale('zh'), '简体中文'),
   MapEntry(Locale('it'), 'Italiano'),
@@ -130,7 +132,7 @@ void main() async {
       child: Scaffold(
         body: Center(
           child: Padding(
-            padding: EdgeInsets.all(32),
+            padding: EdgeInsets.all(AppSpacings.xxl),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -344,7 +346,7 @@ class _ObtainiumState extends State<Obtainium> {
     );
     final isTV = context.select<SettingsProvider, bool>((p) => p.isTV);
 
-    return DynamicColorBuilder(
+    return ObtainiumDynamicColorBuilder(
       builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
         ColorScheme lightColorScheme;
         ColorScheme darkColorScheme;

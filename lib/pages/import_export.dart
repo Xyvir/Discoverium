@@ -10,8 +10,10 @@ import 'package:obtainium/components/ui_widgets.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/core/logging/app_logger.dart';
+import 'package:obtainium/providers/document_tree_bridge.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
+import 'package:obtainium/theme.dart';
 import 'package:obtainium/utils/nav_helper.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
@@ -133,7 +135,7 @@ class _ImportFromURLListPageState extends State<ImportFromURLListPage> {
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
-                      spacing: 16,
+                      spacing: AppSpacings.lg,
                       children: [
                         ConnectedCard(
                           color: Theme.of(
@@ -155,7 +157,7 @@ class _ImportFromURLListPageState extends State<ImportFromURLListPage> {
                             return context.read<SettingsProvider>().isTV
                                 ? TvTextFieldFocus(
                                     textFocusNode: _urlListFocus,
-                                    borderRadius: 24,
+                                    borderRadius: AppRadii.large,
                                     child: field,
                                   )
                                 : field;
@@ -193,7 +195,7 @@ class _ImportFromURLListPageState extends State<ImportFromURLListPage> {
                         ConnectedCard(
                           isFirst: true,
                           isLast: true,
-                          padding: const EdgeInsets.all(16),
+                          padding: AppPaddings.cardInner,
                           child: Text(
                             tr('importedAppsIdDisclaimer'),
                             textAlign: TextAlign.center,
@@ -225,12 +227,21 @@ class ImportSection extends StatefulWidget {
 
 class _ImportSectionState extends State<ImportSection> {
   bool importInProgress = false;
+  bool _downloadsSupported = false;
+
+  @override
+  void initState() {
+    super.initState();
+    DocumentTreeBridge.instance.downloadsExportsSupported().then((supported) {
+      if (mounted) setState(() => _downloadsSupported = supported);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: 12,
+      spacing: AppSpacings.md,
       children: [
         if (importInProgress) const LinearProgressIndicator(),
         ConnectedCard(
@@ -242,8 +253,20 @@ class _ImportSectionState extends State<ImportSection> {
             onTap: importInProgress ? null : () => _runObtainiumImport(context),
           ),
         ),
+        if (context.read<SettingsProvider>().isTV && _downloadsSupported)
+          ConnectedCard(
+            isFirst: true,
+            isLast: true,
+            child: ActionListTile(
+              icon: Icons.folder_open_outlined,
+              label: tr('importFromDownloads'),
+              onTap: importInProgress
+                  ? null
+                  : () => _runDownloadsImport(context),
+            ),
+          ),
         Column(
-          spacing: 3,
+          spacing: AppSpacings.connectedGap,
           children: () {
             final tiles = <Widget>[
               ActionListTile(
@@ -286,7 +309,6 @@ class _ImportSectionState extends State<ImportSection> {
   }
 
   Future<void> _runObtainiumImport(BuildContext context) async {
-    final appsProvider = context.read<AppsProvider>();
     final settingsProvider = context.read<SettingsProvider>();
     settingsProvider.selectionClick();
     final PlatformFile? file;
@@ -316,36 +338,122 @@ class _ImportSectionState extends State<ImportSection> {
         }
         data = utf8.decode(bytesData);
       }
-      try {
-        jsonDecode(data);
-      } catch (e) {
+      if (!context.mounted) return;
+      await _importData(context, data);
+    } catch (e) {
+      if (context.mounted) _showImportError(e, context);
+    } finally {
+      if (mounted) {
+        setState(() {
+          importInProgress = false;
+        });
+      }
+    }
+  }
+
+  /// Imports a JSON payload, confirming overwrites first.
+  Future<void> _importData(BuildContext context, String data) async {
+    final appsProvider = context.read<AppsProvider>();
+    final settingsProvider = context.read<SettingsProvider>();
+    try {
+      jsonDecode(data);
+    } catch (e) {
+      throw ObtainiumError(tr('invalidInput'));
+    }
+    // Importing overwrites matching apps and applies the file's settings;
+    // make that explicit before touching existing data.
+    final conflictCount = appsProvider
+        .appIdsInImportJSON(data)
+        .where((id) => appsProvider.apps.containsKey(id))
+        .length;
+    if (conflictCount > 0) {
+      if (!context.mounted) return;
+      final proceed = await showConfirmDialog(
+        context,
+        title: tr('importX', args: [tr('appsString').toLowerCase()]),
+        content: Text(
+          tr('importOverwriteWarning', args: [conflictCount.toString()]),
+        ),
+        confirmText: tr('continue'),
+      );
+      if (!proceed) return;
+    }
+    final value = await appsProvider.import(data);
+    appsProvider.addMissingCategories(settingsProvider);
+    if (!context.mounted) return;
+    showMessage(
+      '${tr('importedX', args: [plural('apps', value.key.length).toLowerCase()])}${value.value ? ' + ${tr('settings').toLowerCase()}' : ''}',
+      context,
+    );
+  }
+
+  /// Imports an export previously written to `Downloads/Discoverium/` (the
+  /// picker-less export destination for TVs).
+  Future<void> _runDownloadsImport(BuildContext context) async {
+    final settingsProvider = context.read<SettingsProvider>();
+    settingsProvider.selectionClick();
+    final List<DownloadsExport> exports;
+    try {
+      exports = await DocumentTreeBridge.instance.downloadsExports();
+    } catch (e) {
+      if (context.mounted) _showImportError(e, context);
+      return;
+    }
+    if (!context.mounted) return;
+    if (exports.isEmpty) {
+      showMessage(tr('noDownloadsExports'), context);
+      return;
+    }
+    final chosen = await showDialog<DownloadsExport>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: Text(tr('importFromDownloads')),
+        content: SizedBox(
+          width: 480,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var i = 0; i < exports.length; i++)
+                    ListTile(
+                      autofocus: i == 0,
+                      title: Text(exports[i].name),
+                      subtitle: Text(
+                        exports[i].date.toLocal().toString().split('.').first,
+                      ),
+                      onTap: () => Navigator.of(ctx).pop(exports[i]),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(tr('cancel')),
+          ),
+        ],
+      ),
+    );
+    if (chosen == null) return;
+    if (mounted) {
+      setState(() {
+        importInProgress = true;
+      });
+    }
+    try {
+      final bytes = await DocumentTreeBridge.instance.readDownloadsExport(
+        chosen.uri,
+      );
+      if (bytes == null || bytes.isEmpty) {
         throw ObtainiumError(tr('invalidInput'));
       }
-      // Importing overwrites matching apps and applies the file's settings;
-      // make that explicit before touching existing data.
-      final conflictCount = appsProvider
-          .appIdsInImportJSON(data)
-          .where((id) => appsProvider.apps.containsKey(id))
-          .length;
-      if (conflictCount > 0) {
-        if (!context.mounted) return;
-        final proceed = await showConfirmDialog(
-          context,
-          title: tr('importX', args: [tr('appsString').toLowerCase()]),
-          content: Text(
-            tr('importOverwriteWarning', args: [conflictCount.toString()]),
-          ),
-          confirmText: tr('continue'),
-        );
-        if (!proceed) return;
-      }
-      final value = await appsProvider.import(data);
-      appsProvider.addMissingCategories(settingsProvider);
       if (!context.mounted) return;
-      showMessage(
-        '${tr('importedX', args: [plural('apps', value.key.length).toLowerCase()])}${value.value ? ' + ${tr('settings').toLowerCase()}' : ''}',
-        context,
-      );
+      await _importData(context, utf8.decode(bytes));
     } catch (e) {
       if (context.mounted) _showImportError(e, context);
     } finally {
@@ -442,12 +550,37 @@ class _ExportSectionState extends State<ExportSection> {
   Future<Uri?>? _exportDirFuture;
   String? _lastExportDirKey;
   bool exportInProgress = false;
+  bool _downloadsSupported = false;
   final FocusNode _fileNameFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    DocumentTreeBridge.instance.downloadsExportsSupported().then((supported) {
+      if (mounted) setState(() => _downloadsSupported = supported);
+    });
+  }
 
   @override
   void dispose() {
     _fileNameFocus.dispose();
     super.dispose();
+  }
+
+  Future<Uri?> _availableExportDir(
+    SettingsProvider settingsProvider, {
+    required bool hasStoredDir,
+  }) async {
+    var dir = await settingsProvider.getExportDir();
+    for (
+      var attempt = 0;
+      dir == null && hasStoredDir && attempt < 3;
+      attempt++
+    ) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      dir = await settingsProvider.getExportDir();
+    }
+    return dir;
   }
 
   @override
@@ -458,7 +591,10 @@ class _ExportSectionState extends State<ExportSection> {
     final exportDirKey = settingsProvider.prefs?.getString('exportDir');
     if (_exportDirFuture == null || exportDirKey != _lastExportDirKey) {
       _lastExportDirKey = exportDirKey;
-      _exportDirFuture = settingsProvider.getExportDir();
+      _exportDirFuture = _availableExportDir(
+        settingsProvider,
+        hasStoredDir: exportDirKey != null,
+      );
     }
 
     Future<void> runObtainiumExport({bool pickOnly = false}) async {
@@ -468,10 +604,11 @@ class _ExportSectionState extends State<ExportSection> {
         final proceed = await confirmExportIncludesSecrets(context);
         if (!proceed) return;
       }
+      final bool hadDir = (await settingsProvider.getExportDir()) != null;
       setState(() => exportInProgress = true);
       try {
         final result = await appsProvider.export(
-          pickOnly: pickOnly || (await settingsProvider.getExportDir()) == null,
+          pickOnly: pickOnly || !hadDir,
           sp: settingsProvider,
         );
         if (result != null && context.mounted) {
@@ -483,10 +620,7 @@ class _ExportSectionState extends State<ExportSection> {
         if (mounted) {
           setState(() {
             exportInProgress = false;
-            // Re-check access even though the 'exportDir' key may be
-            // unchanged: re-picking the same directory after its grant was
-            // lost (#55) makes it usable again without changing the key.
-            _exportDirFuture = null;
+            if (pickOnly || !hadDir) _lastExportDirKey = null;
           });
         }
       }
@@ -503,10 +637,12 @@ class _ExportSectionState extends State<ExportSection> {
             child: ActionListTile(
               icon: Icons.folder_open_outlined,
               label: tr('pickExportDir'),
-              subtitle: snapshot.data == null
+              subtitle:
+                  snapshot.data == null || exportDirKey == kDownloadsExportDir
                   ? null
                   : prettyExportDirPath(snapshot.data!),
-              trailing: snapshot.data != null
+              trailing:
+                  snapshot.data != null && exportDirKey != kDownloadsExportDir
                   ? Icon(
                       Icons.check_circle,
                       color: Theme.of(context).colorScheme.primary,
@@ -517,6 +653,27 @@ class _ExportSectionState extends State<ExportSection> {
                   : () => runObtainiumExport(pickOnly: true),
             ),
           ),
+          if (settingsProvider.isTV && _downloadsSupported)
+            ConnectedCard(
+              isFirst: false,
+              isLast: false,
+              child: ActionListTile(
+                icon: Icons.download_outlined,
+                label: tr('useDownloadsFolder'),
+                trailing: exportDirKey == kDownloadsExportDir
+                    ? Icon(
+                        Icons.check_circle,
+                        color: Theme.of(context).colorScheme.primary,
+                      )
+                    : null,
+                onTap: exportInProgress || exportDirKey == kDownloadsExportDir
+                    ? null
+                    : () {
+                        settingsProvider.selectionClick();
+                        settingsProvider.useDownloadsExportDir();
+                      },
+              ),
+            ),
           ConnectedCard(
             isFirst: false,
             isLast: snapshot.data == null,
@@ -544,7 +701,7 @@ class _ExportSectionState extends State<ExportSection> {
             ConnectedCard(
               isFirst: false,
               isLast: false,
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
               child: () {
                 final field = TextFormField(
                   focusNode: _fileNameFocus,
@@ -560,7 +717,7 @@ class _ExportSectionState extends State<ExportSection> {
                 return settingsProvider.isTV
                     ? TvTextFieldFocus(
                         textFocusNode: _fileNameFocus,
-                        borderRadius: 16,
+                        borderRadius: AppRadii.medium,
                         child: field,
                       )
                     : field;
@@ -599,7 +756,7 @@ class _ExportSectionState extends State<ExportSection> {
         }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          spacing: 3,
+          spacing: AppSpacings.connectedGap,
           children: items,
         );
       },
@@ -856,13 +1013,13 @@ class _SelectionModalState extends State<SelectionModal> {
             _selectThis(entry.key, value);
           },
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: AppSpacings.elementGap),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacings.elementGap),
               InkWell(
                 onTap: widget.titlesAreLinks
                     ? null
@@ -885,7 +1042,7 @@ class _SelectionModalState extends State<SelectionModal> {
                       },
                       child: _buildDescriptionText(entry),
                     ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacings.elementGap),
             ],
           ),
         ),
@@ -899,7 +1056,7 @@ class _SelectionModalState extends State<SelectionModal> {
   Widget _buildTVSelectTile(MapEntry<String, List<String>> entry) {
     final selected = entrySelections[entry.key] ?? false;
     return TvFocusRing(
-      borderRadius: 16,
+      borderRadius: AppRadii.medium,
       child: ListTile(
         leading: ExcludeFocus(
           child: widget.onlyOneSelectionAllowed
@@ -942,7 +1099,7 @@ class _SelectionModalState extends State<SelectionModal> {
       return [];
     }
     return [
-      const SizedBox(height: 8),
+      const SizedBox(height: AppSpacings.elementGap),
       Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
@@ -1071,7 +1228,7 @@ class _SelectionModalState extends State<SelectionModal> {
                 child: _buildSelectAllButton(filteredEntries),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: AppSpacings.elementGap),
             TextButton(
               autofocus: isTV,
               onPressed: () {
@@ -1079,7 +1236,7 @@ class _SelectionModalState extends State<SelectionModal> {
               },
               child: Text(tr('cancel')),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: AppSpacings.elementGap),
             FilledButton(
               onPressed: entrySelections.values.where((b) => b).isEmpty
                   ? null
