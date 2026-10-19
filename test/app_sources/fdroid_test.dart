@@ -74,6 +74,23 @@ List<String> _offered({
     .map((e) => e.key)
     .toList();
 
+/// The release date given when the page dates builds as [addedOn] says.
+DateTime? _releaseDate(Map<int, DateTime> addedOn) => FDroid()
+    .getAPKUrlsFromFDroidPackagesAPIResponse(
+      _api,
+      'https://f-droid.org/repo/org.jitsi.meet',
+      'https://f-droid.org/packages/org.jitsi.meet',
+      'F-Droid',
+      additionalSettings: {
+        'autoApkFilterByArch': true,
+        'trySelectingSuggestedVersionCode': true,
+      },
+      nativecodes: FDroid.parseNativecodes(_page),
+      deviceAbis: _arm64And32,
+      addedOn: addedOn,
+    )
+    .releaseDate;
+
 void main() {
   final nativecodes = FDroid.parseNativecodes(_page);
 
@@ -84,6 +101,38 @@ void main() {
       26000002: ['arm64-v8a'],
       26000001: ['armeabi-v7a'],
       25060104: <String>[],
+    });
+  });
+
+  test('parsePageMetadata reads when each build was added', () {
+    expect(FDroid.parsePageMetadata(_page).addedOn, {
+      for (final code in nativecodes.keys) code: DateTime(2026, 4, 19),
+    });
+  });
+
+  group('release date', () {
+    test('is when the offered build was added', () {
+      expect(
+        _releaseDate({
+          26000004: DateTime(2026, 4, 20),
+          26000002: DateTime(2026, 4, 19),
+        }),
+        DateTime(2026, 4, 19),
+      );
+    });
+
+    test('falls back to another build of the same version', () {
+      expect(
+        _releaseDate({
+          26000004: DateTime(2026, 4, 20),
+          25060104: DateTime(2026, 1, 2),
+        }),
+        DateTime(2026, 4, 20),
+      );
+    });
+
+    test('is unknown when the page dates no build of the version', () {
+      expect(_releaseDate({25060104: DateTime(2026, 1, 2)}), isNull);
     });
   });
 

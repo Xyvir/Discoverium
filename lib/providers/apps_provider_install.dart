@@ -327,7 +327,12 @@ extension AppsProviderInstall on AppsProvider {
       if (!isAPK || multipleApks) {
         final String apkDirPath = '${downloadedFile.path}-dir';
         if (isTarball) {
-          await extractTarballFile(downloadedFile.path, apkDirPath);
+          await _extractArchive(
+            app,
+            () => extractTarballFile(downloadedFile.path, apkDirPath),
+            destinationPath: apkDirPath,
+            sourceFile: downloadedFile,
+          );
         } else if (isAPK) {
           // A base APK plus split URLs: move the base into the bundle dir so
           // everything is installed together.
@@ -335,7 +340,12 @@ extension AppsProviderInstall on AppsProvider {
             '$apkDirPath/${downloadedFile.path.split('/').last}',
           );
         } else {
-          await unzipFile(downloadedFile.path, apkDirPath);
+          await _extractArchive(
+            app,
+            () => unzipFile(downloadedFile.path, apkDirPath),
+            destinationPath: apkDirPath,
+            sourceFile: downloadedFile,
+          );
         }
         if (multipleApks) {
           // Download the remaining split URLs into the same directory.
@@ -364,7 +374,12 @@ extension AppsProviderInstall on AppsProvider {
                 '$apkDirPath/${splitFile.path.split('/').last}',
               );
             } else {
-              await unzipFile(splitFile.path, apkDirPath);
+              await _extractArchive(
+                app,
+                () => unzipFile(splitFile.path, apkDirPath),
+                destinationPath: apkDirPath,
+                sourceFile: splitFile,
+              );
               unawaited(splitFile.delete());
             }
           }
@@ -599,6 +614,29 @@ extension AppsProviderInstall on AppsProvider {
 
   Future<bool> canDowngradeApps() async =>
       (await getInstalledInfo('com.berdik.letmedowngrade')) != null;
+
+  Future<void> _extractArchive(
+    App app,
+    Future<void> Function() extraction, {
+    required String destinationPath,
+    required File sourceFile,
+  }) async {
+    try {
+      await extraction();
+    } on ObtainiumError {
+      rethrow;
+    } catch (e) {
+      AppLogger.info('Archive extraction failed: ${e.toString()}');
+      final destination = Directory(destinationPath);
+      if (destination.existsSync()) {
+        await destination.delete(recursive: true);
+      }
+      if (sourceFile.existsSync()) {
+        await sourceFile.delete();
+      }
+      throw ObtainiumError(tr('couldNotExtractArchive'))..url = app.url;
+    }
+  }
 
   Future<void> unzipFile(String filePath, String destinationPath) async {
     await ZipFile.extractToDirectory(
@@ -1075,6 +1113,21 @@ extension AppsProviderInstall on AppsProvider {
             urlsToSelectFrom,
             app.rememberedApkName,
           );
+    var apkAbis = const <String, List<String>>{};
+    if (chosenIndex == null &&
+        !pickAnyAsset &&
+        urlsToSelectFrom.length > 1 &&
+        context != null &&
+        context.mounted) {
+      try {
+        apkAbis = await SourceProvider()
+            .getSource(app.url, overrideSource: app.overrideSource)
+            .getApkAbisByUrl(app);
+      } catch (e) {
+        AppLogger.info('Failed to get APK ABI metadata: ${e.toString()}');
+      }
+    }
+
     if (chosenIndex != null) {
       appFileUrl = urlsToSelectFrom[chosenIndex];
     } else if ((urlsToSelectFrom.length > 1 || evenIfSingleChoice) &&
@@ -1088,6 +1141,7 @@ extension AppsProviderInstall on AppsProvider {
             initVal: appFileUrl,
             archs: archs,
             pickAnyAsset: pickAnyAsset,
+            apkAbis: apkAbis,
           );
         },
       );
@@ -1213,6 +1267,10 @@ extension AppsProviderInstall on AppsProvider {
       return;
     }
     try {
+      await getInstaller().ensurePermission();
+      final BuildContext? installContext = context?.mounted == true
+          ? context
+          : null;
       await _installDownloadedApp(
         res.id,
         res.willBeSilent,
@@ -1221,7 +1279,7 @@ extension AppsProviderInstall on AppsProvider {
         installedIds,
         errors,
         // ignore: use_build_context_synchronously
-        context,
+        installContext,
         notificationsProvider,
       );
     } catch (e) {
@@ -1781,7 +1839,6 @@ extension AppsProviderInstall on AppsProvider {
       if (!isBg) settingsProvider.lightImpact();
       willBeSilent = await canInstallSilently(apps[id]!.app);
       final installer = getInstaller();
-      await installer.ensurePermission();
       // Only the stock installer surfaces a system install prompt that pulls the
       // user away; wait for them to return before proceeding.
       if (!willBeSilent &&
